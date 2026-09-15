@@ -1,0 +1,1130 @@
+/* ==========================================================================
+   page.css — 站点骨架样式
+   --------------------------------------------------------------------------
+   分工：卡面与稀有度在 cards.css，这里只管布局、顶栏、按钮、面板、对话框。
+
+   ⚠️ 页面 CSP 是 style-src 'self'（没有 unsafe-inline）：
+     · 不要写 <style> 块，也不要用 style="..." 属性
+     · JS 里 setAttribute('style', ...) 会被静默丢掉，动态值请用 CSSOM
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   变量：配色与尺寸集中在这里，一处改全局
+   -------------------------------------------------------------------------- */
+
+:root {
+  --bg: #f5f4fa;
+  --bg-2: #eceaf5;
+  --panel: #ffffff;
+  --panel-2: #f7f6fc;
+  --text: #1f1b2e;
+  --text-2: #3d3550;
+  --muted: #6b6780;
+  --border: #e4e1ef;
+  --border-2: #d5d1e6;
+
+  --accent: #7b5cff;
+  --accent-weak: #efeaff;
+  --accent-strong: #5b3fd6;
+
+  --ok: #2f9e6b;
+  --warn: #e8a33d;
+  --danger: #e5484d;
+  --danger-strong: #b02a2f;
+  --danger-weak: #fdecec;
+  --gold: #f0c04a;
+
+  --radius: 16px;
+  --radius-sm: 12px;
+  --shadow: 0 2px 10px rgba(30, 20, 60, 0.06);
+  --shadow-lift: 0 8px 24px -8px rgba(30, 20, 60, 0.22);
+
+  /* 卡牌比例。默认 2:3（用户指定的规格），运行时会被 settings.cardRatio 覆盖。
+     为什么需要覆盖：实际资源里 84/93 张是 832x1216（偏 2:3 约 2.6%，肉眼几乎看不出），
+     按主力图的真实比例显示能让绝大多数卡完全贴合、不留白边；
+     硬按 2:3 则每一张都会留一点边。改这里只影响「没配 cardRatio」时的默认值。 */
+  --card-ratio: 2 / 3;
+
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --bar-h: 56px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14121d;
+    --bg-2: #1b1826;
+    --panel: #1e1b2a;
+    --panel-2: #241f33;
+    --text: #f0eef7;
+    --text-2: #ded9ee;
+    --muted: #9d98b3;
+    --border: #322c47;
+    --border-2: #423a5c;
+    --accent: #9b83ff;
+    --accent-weak: #2a2340;
+    --accent-strong: #b6a4ff;
+    --danger-weak: #3a2124;
+    --shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+    --shadow-lift: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   基础
+   -------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.6 system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 顶栏：桌面固定，窄屏换行 */
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+
+.bar-inner {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 1rem;
+  min-height: var(--bar-h);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  text-decoration: none;
+  color: var(--text);
+  font-weight: 700;
+  padding: 0.35rem 0;
+  flex: 0 0 auto;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.9rem;
+}
+
+.brand-text {
+  font-size: 1rem;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
+
+.nav-link {
+  padding: 0.4rem 0.7rem;
+  border-radius: 999px;
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.nav-link:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.nav-on {
+  color: var(--accent-strong);
+  background: var(--accent-weak);
+}
+
+.bar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+}
+
+.cur-chip,
+.warn-chip {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.cur-chip {
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+}
+
+.warn-chip {
+  background: #fff2d6;
+  color: #7a5200;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --------------------------------------------------------------------------
+   碎片
+   -------------------------------------------------------------------------- */
+
+.shard-chip {
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.shard-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.shard-group {
+  padding: 0.7rem 0.85rem;
+}
+
+.shard-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+}
+
+.shard-count {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  min-width: 6rem;
+}
+
+.shard-num {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.shard-unit {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.shard-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+
+.shard-hint {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.shard-hint-off {
+  color: var(--warn);
+}
+
+/* 重复卡的角标与结果摘要 */
+.badge-dup {
+  position: absolute;
+  top: 8px;
+  right: -2px;
+  z-index: 6;
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+  border: 1px solid var(--accent);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.badge-dup.small,
+.badge-new.small {
+  position: static;
+  font-size: 0.6rem;
+}
+
+/* 重复的卡不用灰掉，只做一点边框提示；灰掉会让人以为「没拿到」 */
+.result-dup .card {
+  border-color: var(--accent);
+}
+
+.result-summary,
+.hist-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed var(--border-2);
+  font-size: 0.83rem;
+  color: var(--text-2);
+}
+
+.hist-summary {
+  margin-top: 0;
+  padding: 0.5rem 0.75rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.result-link {
+  color: var(--accent-strong);
+  font-weight: 600;
+  text-decoration: none;
+  margin-left: auto;
+}
+
+.result-link:hover {
+  text-decoration: underline;
+}
+
+/* 系列分组 */
+.series-chip {
+  display: inline-block;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0.12rem 0.6rem;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+  border: 1px solid var(--accent);
+}
+
+.group-note {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+@media (prefers-color-scheme: dark) {
+  .warn-chip {
+    background: #3d2f10;
+    color: #f0c04a;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   主区域
+   -------------------------------------------------------------------------- */
+
+.view {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 1.25rem 1rem 2.5rem;
+}
+
+/* 首页封面：作为整页背景铺一层，上面压半透明遮罩保证可读性 */
+.view.has-cover {
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  position: relative;
+}
+
+.view.has-cover::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg) 72%, transparent), color-mix(in srgb, var(--bg) 94%, transparent));
+  z-index: 0;
+  pointer-events: none;
+}
+
+.view.has-cover > * {
+  position: relative;
+  z-index: 1;
+}
+
+.sec {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.sec-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.sec-title {
+  margin: 0;
+  font-size: 1.3rem;
+  letter-spacing: -0.01em;
+}
+
+.sec-desc {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.sec-extra {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pill {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.22rem 0.65rem;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   按钮
+   -------------------------------------------------------------------------- */
+
+.btn {
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.86rem;
+  padding: 0.42rem 0.9rem;
+  border-radius: 10px;
+  border: 1px solid var(--border-2);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #fff;
+}
+
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.btn.ghost:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.btn.danger {
+  color: var(--danger);
+}
+
+.btn.danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.btn.small {
+  font-size: 0.78rem;
+  padding: 0.28rem 0.6rem;
+}
+
+.btn.big {
+  font-size: 1rem;
+  padding: 0.7rem 1.6rem;
+  border-radius: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   抽卡页
+   -------------------------------------------------------------------------- */
+
+.rate-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 0.5rem;
+}
+
+.rate-cell {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.6rem;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.rate-num {
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.rate-sub {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.rate-off {
+  opacity: 0.5;
+}
+
+.draw-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  padding: 0.9rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.draw-have {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-left: auto;
+}
+
+.result-box {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem;
+  box-shadow: var(--shadow);
+}
+
+.result-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.7rem;
+  font-weight: 600;
+}
+
+.result-time {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 400;
+}
+
+.result-head .btn {
+  margin-left: auto;
+}
+
+/* --------------------------------------------------------------------------
+   卡片网格：自适应列数，不写死
+   -------------------------------------------------------------------------- */
+
+.grid {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.grid.cards {
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+}
+
+.grid.cards .card-lg {
+  min-width: 0;
+}
+
+@media (min-width: 720px) {
+  .grid.cards {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
+}
+
+/* --------------------------------------------------------------------------
+   分组（卡池一览 / 图鉴）
+   -------------------------------------------------------------------------- */
+
+.group {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem;
+  box-shadow: var(--shadow);
+}
+
+.group-warn {
+  border-color: var(--warn);
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.group-meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.pool-tabs {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.tab {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tab-on {
+  background: var(--accent-weak);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+/* --------------------------------------------------------------------------
+   进度条
+   -------------------------------------------------------------------------- */
+
+.progress {
+  height: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--gold));
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+/* --------------------------------------------------------------------------
+   抽卡记录
+   -------------------------------------------------------------------------- */
+
+.hist {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.hist-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.86rem;
+}
+
+.hist-row:last-child {
+  border-bottom: 0;
+}
+
+.hist-row:nth-child(even) {
+  background: var(--panel-2);
+}
+
+.hist-idx {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.78rem;
+  min-width: 4.5rem;
+}
+
+.hist-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hist-time {
+  color: var(--muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+/* 记录指向的卡已不在名册里 —— 明确标出来，不静默变成空 */
+.hist-missing {
+  background: var(--danger-weak) !important;
+  color: var(--danger-strong);
+}
+
+/* --------------------------------------------------------------------------
+   面板与提示
+   -------------------------------------------------------------------------- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.9rem;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.panel-title {
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.panel-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.83rem;
+  line-height: 1.6;
+}
+
+.panel-warn {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, var(--panel));
+}
+
+.panel-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.panel-out {
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  line-height: 1.55;
+  color: var(--text-2);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.7rem;
+  max-height: 15rem;
+  overflow: auto;
+  word-break: break-word;
+}
+
+.panel-out:empty {
+  display: none;
+}
+
+.panel-out-err {
+  border-color: var(--danger);
+  color: var(--danger-strong);
+  background: var(--danger-weak);
+}
+
+.issue-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+
+/* 空状态 */
+.empty {
+  background: var(--panel);
+  border: 1px dashed var(--border-2);
+  border-radius: var(--radius);
+  padding: 1.6rem 1.2rem;
+  text-align: center;
+}
+
+.empty-title {
+  font-weight: 700;
+  margin-bottom: 0.4rem;
+}
+
+.empty-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+
+.empty .panel-actions {
+  justify-content: center;
+  margin-top: 0.8rem;
+}
+
+/* --------------------------------------------------------------------------
+   表单
+   -------------------------------------------------------------------------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.field-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+input[type='text'],
+input[type='password'],
+input[type='number'],
+textarea,
+select {
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 0.42rem 0.6rem;
+  border: 1px solid var(--border-2);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  width: 100%;
+  min-width: 0;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: 2px solid var(--accent-weak);
+  border-color: var(--accent);
+}
+
+textarea {
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.weight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.5rem;
+}
+
+.alert {
+  background: var(--danger-weak);
+  border: 1px solid var(--danger);
+  color: var(--danger-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.7rem;
+  font-size: 0.83rem;
+  white-space: pre-wrap;
+}
+
+/* --------------------------------------------------------------------------
+   后台的卡牌表
+   -------------------------------------------------------------------------- */
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.table th {
+  text-align: left;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0.45rem 0.55rem;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 0.4rem 0.55rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.table tr:last-child td {
+  border-bottom: 0;
+}
+
+.table input,
+.table select {
+  padding: 0.28rem 0.45rem;
+  font-size: 0.82rem;
+}
+
+.cell-img {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell-actions {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.cell-warn {
+  color: var(--danger);
+  font-size: 0.72rem;
+}
+
+.row-hidden {
+  opacity: 0.55;
+}
+
+/* --------------------------------------------------------------------------
+   对话框
+   -------------------------------------------------------------------------- */
+
+.dialog {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0;
+  background: var(--panel);
+  color: var(--text);
+  max-width: 30rem;
+  width: calc(100% - 2rem);
+  box-shadow: 0 20px 60px -20px rgba(20, 12, 40, 0.4);
+}
+
+.dialog.wide {
+  max-width: 60rem;
+}
+
+.dialog::backdrop {
+  background: rgba(20, 12, 40, 0.42);
+  backdrop-filter: blur(2px);
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 1.1rem;
+  margin: 0;
+}
+
+.dialog-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.dialog-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.2rem;
+}
+
+.editor-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+
+/* --------------------------------------------------------------------------
+   Toast 与页脚
+   -------------------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  z-index: 80;
+  max-width: min(90vw, 34rem);
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--bg);
+  font-size: 0.86rem;
+  font-weight: 600;
+  box-shadow: var(--shadow-lift);
+  text-align: center;
+}
+
+.toast-ok {
+  background: var(--ok);
+  color: #fff;
+}
+
+.toast-error {
+  background: var(--danger);
+  color: #fff;
+  border-radius: var(--radius-sm);
+}
+
+.foot {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.foot-inner {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0.85rem 1rem;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.foot-meta {
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   窄屏
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 560px) {
+  .bar-inner {
+    padding: 0.4rem 0.7rem;
+    gap: 0.5rem;
+  }
+
+  .nav {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding-bottom: 0.3rem;
+  }
+
+  .view {
+    padding: 1rem 0.7rem 2rem;
+  }
+
+  .grid.cards {
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+    gap: 0.55rem;
+  }
+
+  .draw-have {
+    margin-left: 0;
+    width: 100%;
+  }
+}
