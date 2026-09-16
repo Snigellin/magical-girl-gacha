@@ -821,6 +821,227 @@
     return box
   }
 
+  // -------------------------------------------------------------------------
+  // 图片缓存（Service Worker + Cache Storage）
+  // -------------------------------------------------------------------------
+  //
+  // 站点在 GitHub Pages 上，而 Pages **不允许自定义响应头**，图片只拿到
+  // `Cache-Control: max-age=600`（10 分钟就过期）。整套资源 12.5 MB，
+  // 所以「每次打开都重新加载」是真实存在的问题。
+  // Service Worker 是 Pages 上唯一能自己说了算的缓存层；这个区块提供
+  // 「看缓存状态 / 一次抓好 / 清掉重来」三件事。
+
+  /** 缓存名必须与 page/sw.js 里的 CACHE_NAME 一致 */
+  var IMG_CACHE = 'gacha-img-v1'
+
+  function cacheSupported() {
+    try {
+      return typeof caches !== 'undefined' && !!caches && typeof caches.open === 'function'
+    } catch (e) {
+      return false
+    }
+  }
+
+  /**
+   * 注册 Service Worker。
+   *
+   * 失败**不算错**：缓存是优化，不是功能。不支持（老浏览器 / 非 https）时
+   * 页面照常工作，只是每次重新下载图片。
+   */
+  function registerServiceWorker() {
+    try {
+      if (typeof navigator === 'undefined' || !navigator.serviceWorker) return
+      var base = CFG.base || ''
+      navigator.serviceWorker.register(base + '/sw.js', { scope: base + '/' }).catch(function (err) {
+        console.warn('[gacha] 注册图片缓存失败（不影响使用）：' + ((err && err.message) || err))
+      })
+    } catch (e) {}
+  }
+
+  /** 所有值得缓存的图片 URL（卡面 + 卡池封面 + 横幅 + 首页封面 + 表情包） */
+  function allImageUrls() {
+    var out = []
+    var seen = {}
+    var add = function (u) {
+      if (u && !seen[u]) {
+        seen[u] = 1
+        out.push(u)
+      }
+    }
+    var d = state.data || {}
+    ;(d.cards || []).forEach(function (c) { add(c.imageUrl) })
+    ;(d.pools || []).forEach(function (p) {
+      add(p.coverCardUrl)
+      ;(p.bannerUrls || []).forEach(add)
+    })
+    var s = d.settings || {}
+    add(s.coverImageUrl)
+    for (var k in s.emojiUrls || {}) add(s.emojiUrls[k])
+    return out
+  }
+
+  function fmtBytes(n) {
+    var b = Number(n) || 0
+    if (b < 1024) return b + ' B'
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB'
+    return (b / 1048576).toFixed(1) + ' MB'
+  }
+
+  function imgCacheStats() {
+    if (!cacheSupported()) return Promise.resolve(null)
+    return caches
+      .open(IMG_CACHE)
+      .then(function (cache) {
+        return cache.keys().then(function (keys) {
+          var jobs = keys.map(function (req) {
+            return cache
+              .match(req)
+              .then(function (res) {
+                if (!res) return 0
+                return res
+                  .clone()
+                  .blob()
+                  .then(function (b) { return b.size })
+                  .catch(function () { return 0 })
+              })
+              .catch(function () { return 0 })
+          })
+          return Promise.all(jobs).then(function (sizes) {
+            var total = 0
+            for (var i = 0; i < sizes.length; i++) total += sizes[i]
+            return { count: keys.length, bytes: total }
+          })
+        })
+      })
+      .catch(function () { return null })
+  }
+
+  function clearImageCache() {
+    if (!cacheSupported()) return Promise.resolve(false)
+    return caches
+      .keys()
+      .then(function (names) {
+        var mine = names.filter(function (n) { return n.indexOf('gacha-img-') === 0 })
+        return Promise.all(mine.map(function (n) { return caches.delete(n) })).then(function () { return true })
+      })
+      .catch(function () { return false })
+  }
+
+  /**
+   * 把全部图片抓进缓存。
+   *
+   * **限并发 4**：一次丢出 130+ 个请求会把带宽抢光（页面自己的请求也会被挤掉），
+   * 并发太高在移动端还容易整批失败。逐张推进并回报进度，读者才知道要等多久。
+   */
+  function cacheAllImages(onProgress) {
+    if (!cacheSupported()) return Promise.resolve({ ok: false, error: '这个浏览器不支持 Cache Storage' })
+    var urls = allImageUrls()
+    if (!urls.length) return Promise.resolve({ ok: true, done: 0, total: 0, failed: 0 })
+    return caches
+      .open(IMG_CACHE)
+      .then(function (cache) {
+        var idx = 0
+        var done = 0
+        var failed = 0
+        var CONCURRENCY = 4
+        var worker = function () {
+          if (idx >= urls.length) return Promise.resolve()
+          var u = urls[idx++]
+          return fetch(u, { credentials: 'same-origin' })
+            .then(function (res) {
+              if (res && res.ok) {
+                return cache.put(u, res.clone()).then(function () { done++ })
+              }
+              failed++
+              return null
+            })
+            .catch(function () { failed++ })
+            .then(function () {
+              if (onProgress) onProgress(done + failed, urls.length)
+              return worker()
+            })
+        }
+        var workers = []
+        for (var i = 0; i < CONCURRENCY; i++) workers.push(worker())
+        return Promise.all(workers).then(function () {
+          return { ok: true, done: done, total: urls.length, failed: failed }
+        })
+      })
+      .catch(function (err) {
+        return { ok: false, error: (err && err.message) || '缓存失败' }
+      })
+  }
+
+  var cacheBusy = false
+
+  function openCacheDialog() {
+    var dlg = state.els.cacheDialog
+    if (!dlg) return
+    paintCacheDialog()
+    showModal(dlg)
+  }
+
+  function paintCacheDialog() {
+    var stat = state.els.cacheStat
+    var hint = state.els.cacheHint
+    var fill = state.els.cacheFill
+    var clear = state.els.cacheClear
+    var total = allImageUrls().length
+    if (!cacheSupported()) {
+      if (stat) stat.textContent = '这个浏览器不支持 Cache Storage —— 图片每次都会重新下载。'
+      if (fill) fill.disabled = true
+      if (clear) clear.disabled = true
+      if (hint) hint.textContent = '换一个现代浏览器（Chrome / Edge / Firefox / Safari）就能用上图片缓存。'
+      return
+    }
+    if (stat) stat.textContent = '读取中…'
+    if (hint) hint.textContent = '一次抓好这 ' + total + ' 张图，之后打开就是本地读取。抓取期间别关页面。'
+    imgCacheStats().then(function (s) {
+      if (!stat) return
+      if (!s) {
+        stat.textContent = '读不到缓存状态（浏览器可能禁用了存储）。'
+        return
+      }
+      stat.textContent = '已缓存 ' + s.count + ' 张 / ' + fmtBytes(s.bytes) + '（本站共 ' + total + ' 张图片）'
+    })
+  }
+
+  function doCacheAll() {
+    if (cacheBusy) return
+    cacheBusy = true
+    var stat = state.els.cacheStat
+    var fill = state.els.cacheFill
+    if (fill) fill.disabled = true
+    if (stat) stat.textContent = '开始缓存…'
+    cacheAllImages(function (n, total) {
+      if (stat) stat.textContent = '缓存中 ' + n + ' / ' + total + ' …'
+    }).then(function (r) {
+      cacheBusy = false
+      if (fill) fill.disabled = false
+      if (!r.ok) {
+        if (stat) stat.textContent = '缓存失败：' + r.error
+        return
+      }
+      // 状态行归「数字」，结果归 toast。
+      // ⚠️ 不要再往 stat 里写「缓存完成：5 / 5 张」—— paintCacheDialog() 紧接着就会
+      // 用「已缓存 5 张 / 55 B」覆盖掉它，两条路径抢同一个文本节点，后写的赢。
+      // （这正是最初那版的行为：完成提示一闪而过，测试也抓不到。）
+      paintCacheDialog()
+      toast(r.failed ? '缓存完成，但有 ' + r.failed + ' 张失败' : '图片已缓存，下次打开不用重新下载', r.failed ? 'error' : 'ok')
+    })
+  }
+
+  function doClearCache() {
+    if (cacheBusy) return
+    if (!window.confirm('清掉本机缓存的图片？下次打开会重新下载（不会影响抽卡记录）。')) return
+    clearImageCache().then(function (ok) {
+      // 同上：清空的结果用 toast 说，状态行交给 paintCacheDialog 显示准确数字。
+      if (ok) paintCacheDialog()
+      else if (state.els.cacheStat) state.els.cacheStat.textContent = '清理失败（浏览器可能禁用了存储）。'
+      toast(ok ? '图片缓存已清空' : '清理失败', ok ? 'ok' : 'error')
+    })
+  }
+
   function rarityChip(rarityId, opts) {
     opts = opts || {}
     var r = rarityById(rarityId)
@@ -3197,6 +3418,7 @@
     e.unlockDialog = document.getElementById('unlock-dialog')
     e.pickDialog = document.getElementById('pick-dialog')
     e.cardDialog = document.getElementById('card-dialog')
+    e.cacheDialog = document.getElementById('cache-dialog')
 
     // 缺失的绑定必须说出来 —— 否则只会表现成「某个角落不更新」，极难定位
     var REQUIRED = ['view', 'nav', 'brandTitle', 'warning', 'currency', 'shardChip', 'unlockBtn', 'lockBtn', 'toast']
@@ -3245,6 +3467,11 @@
     // 大图弹层被 Esc / 点遮罩关掉时，state.cardOpen 也要跟着清掉，
     // 否则再点同一张卡会被误判成「已经开着」。
     if (e.cardDialog) e.cardDialog.addEventListener('close', function () { state.cardOpen = '' })
+    // 图片缓存：入口在页脚（静态站与动态站都要有，所以不放在后台里）
+    if (e.cacheBtn) e.cacheBtn.addEventListener('click', openCacheDialog)
+    if (e.cacheClose) e.cacheClose.addEventListener('click', function () { hide(e.cacheDialog) })
+    if (e.cacheFill) e.cacheFill.addEventListener('click', doCacheAll)
+    if (e.cacheClear) e.cacheClear.addEventListener('click', doClearCache)
     if (e.shardChip) {
       e.shardChip.addEventListener('click', function () { go('#/shards') })
     }
@@ -3322,6 +3549,9 @@
     // 数据里已经没有这个池时由 currentPool() 兜回第一个池。
     var savedPool = lsGet(LS.pool, '')
     if (savedPool) state.poolId = String(savedPool)
+    // 图片缓存：注册 Service Worker。放在数据加载**之前** ——
+    // 越早注册，越早开始接管图片请求；失败也不影响页面。
+    registerServiceWorker()
     loadData()
       .then(function () {
         render()

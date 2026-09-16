@@ -1096,6 +1096,35 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
+/* 页脚右侧：图片缓存入口 + 元信息 */
+.foot-right {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* 缓存对话的状态行：数字要对齐，长句子要能换行 */
+.cache-stat {
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 0.86rem;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 缓存对话的按钮略大一点：这是个「要等一会儿」的动作 */
+#cache-dialog .dialog-actions {
+  flex-wrap: wrap;
+}
+
+#cache-dialog .dialog-actions .btn {
+  flex: 1 1 auto;
+  min-width: 7rem;
+}
+
 /* --------------------------------------------------------------------------
    图鉴：搜索栏 + 可收起的系列组 + 点开看大图
    -------------------------------------------------------------------------- */
