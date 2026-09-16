@@ -1,12 +1,17 @@
 /**
  * shards.js — 碎片系统的规则（纯逻辑，无 DOM）
  *
- * 用户 2026-09-15 明确的规则：
+ * 用户 2026-09-15 明确的规则，2026-09-16 改了一处：
  *   · 抽到「图鉴里已经解锁过」的卡 = 重复
  *   · 每有一张重复卡，转化成一个**对应稀有度**的碎片
  *   · 5 个碎片可以：
- *       (a) 兑换一张**同档**卡牌
+ *       (a) 兑换一张**同档**卡牌 —— **指定哪一张**（原来是同档随机；
+ *           现在在图鉴里点开一张卡，那里有「合成」按钮）
  *       (b) 换成一张**更高一级**稀有度的碎片
+ *
+ * ⚠️ 「指定」是硬要求，不是默认值：`canExchange(data, rarity, 'card')` 不给
+ * cardId 会**直接判失败**。这里刻意不提供「没给目标就随机一张」的回退 ——
+ * 一个会悄悄退回随机的接口，正是这次要修掉的东西。
  *
  * 这个文件不碰 DOM，也不碰存储 —— 它只回答「这样做合不合法、结果是什么」。
  * 所以它能同时被三处使用，规则只有一份：
@@ -89,6 +94,34 @@
     return n
   }
 
+  /** 按 id 找一张卡（找不到返回 null） */
+  function findCard(data, cardId) {
+    var id = String(cardId == null ? '' : cardId)
+    if (!id) return null
+    var cards = (data && data.cards) || []
+    for (var i = 0; i < cards.length; i++) {
+      if (cards[i] && String(cards[i].id) === id) return cards[i]
+    }
+    return null
+  }
+
+  /**
+   * 某张卡能不能被合成（碎片兑卡已从「随机」改为「指定」）。
+   *
+   * 存在的意义：图鉴里每张卡都要独立知道自己「现在能不能合成、还差几个」，
+   * 而判断只应该有一份 —— 所以它内部调用 `canExchange(..., 'card', cardId)`，
+   * 不另写一套规则。稀有度直接从卡上取，调用方不用先查表。
+   *
+   * @returns {{ok:true, cost, card, rarity} | {ok:false, error, card?}}
+   */
+  function canSynthesize(data, cardId) {
+    var card = findCard(data, cardId)
+    if (!card) return { ok: false, error: '找不到卡牌「' + cardId + '」' }
+    var check = canExchange(data, card.rarity, 'card', cardId)
+    if (!check.ok) return { ok: false, error: check.error, card: card }
+    return { ok: true, cost: check.cost, card: card, rarity: card.rarity }
+  }
+
   /**
    * 每个稀有度的碎片能做什么 —— 给界面用，一眼看清「现在能换什么、还差几个」。
    * @returns {Array<{rarity, have, canRedeemCard, cardCount, missingForCard,
@@ -111,6 +144,10 @@
         have: have,
         // 兑卡：碎片够 **而且** 这一档真的有卡可兑。
         // 只说「碎片够」会让按钮点了才发现没有卡 —— 那是静默失败的一种。
+        //
+        // ⚠️ 改成指定兑换之后这个字段的含义变了：它现在只说
+        // 「这一档**有卡可选**且碎片够」，不再代表「点一下就能换到一张」——
+        // 具体换哪张要在图鉴里点。碎片页用它决定是否放行去图鉴。
         cardCount: count,
         canRedeemCard: have >= r.costForCard && count > 0,
         missingForCard: Math.max(0, r.costForCard - have),
@@ -128,10 +165,15 @@
 
   /**
    * 能不能做这个操作。**判断只写一次，界面与写入方共用**。
+   *
    * @param {'card'|'upgrade'} action
-   * @returns {{ok:true, cost:number, nextRarity:object|null} | {ok:false, error:string}}
+   * @param {string} [cardId] action==='card' 时**必须**给：要合成哪一张。
+   *   兑卡已从「同档内随机」改成「指定」—— 所以没有目标就不是一次合法的兑换，
+   *   这里直接判失败，而不是悄悄退回随机（静默退回随机正是要修掉的行为）。
+   * @returns {{ok:true, cost:number, card:object|null, nextRarity:object|null}
+   *          | {ok:false, error:string}}
    */
-  function canExchange(data, rarityId, action) {
+  function canExchange(data, rarityId, action, cardId) {
     var r = rules(data)
     if (action !== 'card' && action !== 'upgrade') {
       return { ok: false, error: '不认识的操作：' + action + '（只支持 card / upgrade）' }
@@ -145,9 +187,24 @@
     if (!known) return { ok: false, error: '稀有度「' + rarityId + '」不在档位表里' }
 
     if (action === 'card') {
-      var count = cardCountOfRarity(data, rarityId)
-      if (count === 0) {
-        return { ok: false, error: known.label + ' 这一档还没有任何卡牌，碎片兑换不了' }
+      if (!cardId) {
+        return { ok: false, error: '没有指定要合成哪一张卡（现在是指定兑换，请在图鉴里点开一张再合成）' }
+      }
+      var target = findCard(data, cardId)
+      if (!target) return { ok: false, error: '找不到卡牌「' + cardId + '」' }
+      if (target.hidden) {
+        return { ok: false, error: '「' + (target.name || cardId) + '」已隐藏，不能合成' }
+      }
+      if (!target.rarityKnown) {
+        return { ok: false, error: '「' + (target.name || cardId) + '」还没有设置稀有度，不能合成' }
+      }
+      // 档位必须与碎片档位一致 —— 否则就能用 SR 碎片换 UR 卡
+      if (String(target.rarity) !== String(rarityId)) {
+        return {
+          ok: false,
+          error: '「' + (target.name || cardId) + '」是 ' + String(target.rarity) + '，不是 ' + known.label +
+            '，不能用 ' + known.label + ' 碎片合成',
+        }
       }
       if (have < r.costForCard) {
         return {
@@ -155,7 +212,7 @@
           error: known.label + ' 碎片不够：需要 ' + r.costForCard + ' 个，现有 ' + have + ' 个',
         }
       }
-      return { ok: true, cost: r.costForCard, nextRarity: null }
+      return { ok: true, cost: r.costForCard, card: target, nextRarity: null }
     }
 
     var next = nextRarity(data, rarityId)
@@ -168,24 +225,23 @@
         error: known.label + ' 碎片不够：升档需要 ' + r.costForUpgrade + ' 个，现有 ' + have + ' 个',
       }
     }
-    return { ok: true, cost: r.costForUpgrade, nextRarity: next }
+    return { ok: true, cost: r.costForUpgrade, card: null, nextRarity: next }
   }
 
   /**
-   * 计算一次交换的结果。**纯函数**：返回新的碎片表与（兑卡时的）卡牌，不改输入。
+   * 计算一次交换的结果。**纯函数**：返回新的碎片表与（合成时的）卡牌，不改输入。
    *
    * @param {object} data 快照（需要 rarities / cards / player.shards / settings.shards）
    * @param {string} rarityId
    * @param {'card'|'upgrade'} action
-   * @param {function} [rng] 同档内选卡的随机源（测试可传可复现的）
-   * @returns {{ok:true, cost, shards, card, gainedShard, nextRarity}
+   * @param {string} [cardId] action==='card' 时必须给（指定合成哪一张）
+   * @returns {{ok:true, action, cost, shards, card, gainedShard, nextRarity}
    *          | {ok:false, error}}
    */
-  function exchange(data, rarityId, action, rng) {
-    var check = canExchange(data, rarityId, action)
+  function exchange(data, rarityId, action, cardId) {
+    var check = canExchange(data, rarityId, action, cardId)
     if (!check.ok) return check
 
-    var random = rng || Math.random
     var shards = Object.assign({}, (data && data.player && data.player.shards) || {})
     shards[rarityId] = Math.max(0, Number(shards[rarityId] || 0) - check.cost)
     if (shards[rarityId] === 0) delete shards[rarityId]
@@ -204,24 +260,14 @@
       }
     }
 
-    // 兑卡：同档内等概率抽一张（与抽卡时「同稀有度内等概率」一致）
-    var pool = []
-    var cards = (data && data.cards) || []
-    for (var i = 0; i < cards.length; i++) {
-      var c = cards[i]
-      if (!c.hidden && c.rarityKnown && c.rarity === rarityId) pool.push(c)
-    }
-    if (!pool.length) {
-      // canExchange 已经挡过一次；这里是二次防线，绝不返回 undefined
-      return { ok: false, error: '稀有度「' + rarityId + '」下没有可兑换的卡牌（数据不一致）' }
-    }
-    var pick = pool[Math.min(pool.length - 1, Math.floor(random() * pool.length))]
+    // 合成指定的那一张。canExchange 已经把「找不到/隐藏/没稀有度/档位不符」全挡过了，
+    // 这里直接用它的结果 —— 不再自己查一遍（两处判断必然有一天会不一致）。
     return {
       ok: true,
       action: action,
       cost: check.cost,
       shards: shards,
-      card: pick,
+      card: check.card,
       gainedShard: null,
       nextRarity: null,
     }
@@ -291,7 +337,9 @@
     nextRarity: nextRarity,
     prevRarity: prevRarity,
     cardCountOfRarity: cardCountOfRarity,
+    findCard: findCard,
     status: status,
+    canSynthesize: canSynthesize,
     canExchange: canExchange,
     exchange: exchange,
     settleDraw: settleDraw,

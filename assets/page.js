@@ -85,6 +85,8 @@
     last: 'gacha.last.v1',
     /** 抽卡动画开关（读者自己的偏好，不写服务端） */
     anim: 'gacha.anim.v1',
+    /** 图鉴里收起的系列组（也是读者偏好） */
+    collapsed: 'gacha.collapsed.v1',
   }
 
   var state = {
@@ -103,6 +105,12 @@
     editing: null,
     /** 本次会话的碎片兑换记录（只用于显示，不落盘） */
     shardLog: [],
+    /** 图鉴搜索词（切板块后保留，回来还在） */
+    collQuery: '',
+    /** 图鉴里收起的系列组 { 'series:女仆系列': true } */
+    collapsed: {},
+    /** 大图弹层当前显示的卡 id */
+    cardOpen: '',
     els: {},
   }
 
@@ -213,6 +221,26 @@
 
   function fmt(n) {
     return String(n == null ? 0 : n)
+  }
+
+  /**
+   * 出率（0~1 的小数）显示成百分比。
+   *
+   * 为什么要专门写一个：权重现在是 60 / 35 / **4.4** / **0.6**，
+   * 直接用 `(rate*100).toFixed(2)` 会显示成「4.40%」「0.60%」——
+   * 数字没错，但和作者心里想的「4.4%」「0.6%」看着不像一回事，
+   * 而 60% 显示成「60.00%」又啰嗦。这里去掉多余的 0。
+   *
+   * ⚠️ 只去掉**小数部分**末尾的 0，不能把「60」变成「6」：
+   * 正则 `\.?0+$` 会连着小数点一起吃掉（"60.00" -> "60"、"4.40" -> "4.4"），
+   * 而 "0.60" 里那个 0 前面是 6，所以只吃掉末尾的 0 -> "0.6"。
+   */
+  function fmtRate(rate) {
+    var p = Number(rate) * 100
+    if (!isFinite(p)) return '0%'
+    var s = p.toFixed(2)
+    if (s.indexOf('.') !== -1) s = s.replace(/\.?0+$/, '')
+    return (s === '' ? '0' : s) + '%'
   }
 
   function fmtTime(ms) {
@@ -930,7 +958,7 @@
         el('div', { class: 'rate-row' }, rates.map(function (x) {
           return el('div', { class: 'rate-cell' + (x.playable ? '' : ' rate-off') }, [
             rarityChip(x.rarity.id),
-            el('div', { class: 'rate-num', text: (x.rate * 100).toFixed(2) + '%' }),
+            el('div', { class: 'rate-num', text: fmtRate(x.rate) }),
             el('div', { class: 'rate-sub', text: x.count + ' 张' }),
           ])
         }))
@@ -1103,7 +1131,7 @@
         if (!rate || !rate.playable) {
           meta = row.count + ' 张 · 抽不出（权重 0 或这一档没配权重）'
         } else {
-          meta = row.count + ' 张 · 出率 ' + (rate.rate * 100).toFixed(2) + '%'
+          meta = row.count + ' 张 · 出率 ' + fmtRate(rate.rate)
         }
         wrap.appendChild(
           el('div', { class: 'group' + (rate && rate.playable ? '' : ' group-off') }, [
@@ -1194,22 +1222,57 @@
     return groups
   }
 
+  /**
+   * 一张卡是否匹配图鉴搜索词。
+   *
+   * 匹配范围：角色名 / 系列名 / 稀有度（id 与 label 都算）。
+   * 为什么连系列名也匹配：用户搜「女仆系列」时想要的是那一组卡，
+   * 而组里每张卡的**名字**里并没有「女仆系列」四个字 —— 只搜名字会让
+   * 搜索看起来「明明有这个系列却搜不到」。
+   */
+  function cardMatches(card, q) {
+    if (!q) return true
+    var hay = [
+      card.name,
+      card.series,
+      card.rarity,
+      (rarityById(card.rarity) || {}).label,
+    ]
+    for (var i = 0; i < hay.length; i++) {
+      if (hay[i] && String(hay[i]).toLowerCase().indexOf(q) !== -1) return true
+    }
+    return false
+  }
+
+  /** 图鉴里被收起的系列组（键就是 group.key），存本机浏览器 */
+  function collapsedMap() {
+    if (!state.collapsed || typeof state.collapsed !== 'object') state.collapsed = {}
+    return state.collapsed
+  }
+
+  function setCollapsed(key, on) {
+    var m = collapsedMap()
+    if (on) m[key] = true
+    else delete m[key]
+    lsSet(LS.collapsed, m)
+  }
+
   function viewCollection() {
     var view = state.els.view
     var wrap = el('div', { class: 'sec' })
-    var cards = state.data.cards.filter(function (c) { return !c.hidden })
+    var allCards = state.data.cards.filter(function (c) { return !c.hidden })
     var owned = collection()
     var got = 0
-    cards.forEach(function (c) { if (Number(owned[c.id] || 0) > 0) got += 1 })
-    var pct = cards.length ? Math.round((got / cards.length) * 100) : 0
+    allCards.forEach(function (c) { if (Number(owned[c.id] || 0) > 0) got += 1 })
+    var pct = allCards.length ? Math.round((got / allCards.length) * 100) : 0
     var seriesCount = {}
-    cards.forEach(function (c) {
+    allCards.forEach(function (c) {
       if (c.series) seriesCount[c.series] = (seriesCount[c.series] || 0) + 1
     })
     var seriesNames = Object.keys(seriesCount)
 
     wrap.appendChild(
-      sectionHead('图鉴', '收集进度：已获得 ' + got + ' / ' + cards.length + ' 张（' + pct + '%）', [
+      sectionHead('图鉴', '收集进度：已获得 ' + got + ' / ' + allCards.length + ' 张（' + pct + '%）', [
         el('span', { class: 'pill', text: '累计 ' + fmt(player().pulls) + ' 抽' }),
         Number(player().duplicates || 0) > 0
           ? el('span', { class: 'pill', text: '重复 ' + fmt(player().duplicates) + ' 张' })
@@ -1224,45 +1287,167 @@
     if (fill) fill.style.width = pct + '%'
     wrap.appendChild(bar)
 
-    if (!cards.length) {
+    if (!allCards.length) {
       wrap.appendChild(emptyBox('图鉴是空的', ['还没有任何卡牌。']))
       view.appendChild(wrap)
       return
     }
 
-    collectionGroups(cards).forEach(function (g) {
-      var gotHere = g.cards.filter(function (c) { return Number(owned[c.id] || 0) > 0 }).length
-      var head
-      if (g.kind === 'series') {
-        head = el('div', { class: 'group-head' }, [
-          el('span', { class: 'series-chip', text: g.label }),
-          el('span', { class: 'group-meta', text: gotHere + ' / ' + g.cards.length }),
-          el('span', { class: 'group-note', text: '系列' }),
-        ])
-      } else if (g.kind === 'unknown') {
-        head = el('div', { class: 'group-head' }, [
-          el('span', { class: 'chip chip-big chip-warn', text: g.label }),
-          el('span', { class: 'group-meta', text: g.cards.length + ' 张' }),
-        ])
-      } else {
-        head = el('div', { class: 'group-head' }, [
-          rarityChip(g.label, { big: true }),
-          el('span', { class: 'group-meta', text: gotHere + ' / ' + g.cards.length }),
-        ])
-      }
+    // ---- 搜索框 -----------------------------------------------------------
+    //
+    // ⚠️ 这个输入框**不能**在每次按键时触发整页 render()：
+    // 那样会把它自己重建一遍，光标和焦点每次都丢，中文输入法还更容易断字。
+    // 所以这里只重画下面的列表（paint），输入框节点始终是同一个。
+    var searchInput = el('input', {
+      class: 'coll-search',
+      type: 'search',
+      placeholder: '搜索角色名 / 系列名 / 稀有度',
+      autocomplete: 'off',
+      spellcheck: 'false',
+      'aria-label': '搜索卡牌',
+    })
+    searchInput.value = state.collQuery || ''
+    var foundNote = el('span', { class: 'coll-found' })
+    wrap.appendChild(
+      el('div', { class: 'coll-toolbar' }, [
+        el('div', { class: 'coll-search-box' }, [
+          el('span', { class: 'coll-search-icon', 'aria-hidden': 'true', text: '⌕' }),
+          searchInput,
+        ]),
+        foundNote,
+        el('button', { class: 'btn ghost coll-expand', type: 'button', 'data-coll': 'expand' }, ['全部展开']),
+        el('button', { class: 'btn ghost coll-expand', type: 'button', 'data-coll': 'collapse' }, ['全部收起']),
+      ])
+    )
 
-      wrap.appendChild(
-        el('div', { class: 'group' + (g.kind === 'unknown' ? ' group-warn' : '') }, [
-          head,
-          el('div', { class: 'grid cards' }, g.cards.map(function (c) {
-            var n = Number(owned[c.id] || 0)
-            var holder = el('div', { class: 'coll-cell' + (n > 0 ? '' : ' coll-locked') })
-            holder.appendChild(cardFigure(c))
-            if (n > 0) holder.appendChild(el('div', { class: 'badge-owned', text: n > 1 ? '×' + n : '已获得' }))
-            return holder
-          })),
-        ])
-      )
+    var listBox = el('div', { class: 'coll-list' })
+    wrap.appendChild(listBox)
+
+    function paint() {
+      clear(listBox)
+      var q = String(state.collQuery || '').trim().toLowerCase()
+      var groups = collectionGroups(allCards)
+      var shownGroups = 0
+      var shownCards = 0
+
+      groups.forEach(function (g) {
+        var list = g.cards.filter(function (c) { return cardMatches(c, q) })
+        if (!list.length) return
+        shownGroups++
+        shownCards += list.length
+
+        var gotHere = list.filter(function (c) { return Number(owned[c.id] || 0) > 0 }).length
+        // 搜索时强制展开：搜到了却还收着，看起来就像「搜不到」。
+        // 系列组才可收起 —— 需求要的是「同系列的卡可以收起」，稀有度组本来就是平的。
+        var collapsible = g.kind === 'series'
+        var collapsed = collapsible && !q && !!collapsedMap()[g.key]
+
+        var head
+        if (g.kind === 'series') {
+          head = el('button', {
+            class: 'group-head group-toggle',
+            type: 'button',
+            'aria-expanded': collapsed ? 'false' : 'true',
+            'data-coll-key': g.key,
+          }, [
+            el('span', { class: 'group-caret', 'aria-hidden': 'true', text: collapsed ? '▸' : '▾' }),
+            el('span', { class: 'series-chip', text: g.label }),
+            el('span', { class: 'group-meta', text: gotHere + ' / ' + list.length }),
+            el('span', { class: 'group-note', text: collapsed ? '已收起 · 系列' : '系列' }),
+          ])
+          // 直接绑在这个按钮上，不用事件委托：委托要靠事件冒泡 + closest()，
+          // 而测试用的 DOM shim 两样都没有 —— 那样写出来的代码在测试里
+          // 「点了没反应」，于是测试根本测不到收起功能。
+          head.addEventListener('click', function () {
+            var m = collapsedMap()
+            setCollapsed(g.key, !m[g.key])
+            paint()
+            // paint() 重建了整个列表，刚才那个按钮已经不在文档里了 ——
+            // 不把焦点还给新节点，键盘用户点一下就掉焦点。
+            var again = listBox.querySelector('[data-coll-key="' + g.key + '"]')
+            if (again && typeof again.focus === 'function') again.focus()
+          })
+        } else if (g.kind === 'unknown') {
+          head = el('div', { class: 'group-head' }, [
+            el('span', { class: 'chip chip-big chip-warn', text: g.label }),
+            el('span', { class: 'group-meta', text: list.length + ' 张' }),
+          ])
+        } else {
+          head = el('div', { class: 'group-head' }, [
+            rarityChip(g.label, { big: true }),
+            el('span', { class: 'group-meta', text: gotHere + ' / ' + list.length }),
+          ])
+        }
+
+        listBox.appendChild(
+          el('div', { class: 'group' + (g.kind === 'unknown' ? ' group-warn' : '') + (collapsed ? ' is-collapsed' : '') }, [
+            head,
+            el('div', { class: 'grid cards' }, list.map(function (c) {
+              var n = Number(owned[c.id] || 0)
+              var holder = el('div', { class: 'coll-cell' + (n > 0 ? '' : ' coll-locked') })
+              holder.appendChild(cardFigure(c))
+              if (n > 0) holder.appendChild(el('div', { class: 'badge-owned', text: n > 1 ? '×' + n : '已获得' }))
+              // 「点图看大图」：整张卡都可点，命中区域大才不会点空
+              var open = el('button', {
+                class: 'coll-open',
+                type: 'button',
+                'data-card': c.id,
+                title: '看大图 / 合成：' + (c.name || c.id),
+                'aria-label': '查看大图：' + (c.name || c.id),
+              }, [el('span', { class: 'coll-open-hint', text: '看大图' })])
+              open.addEventListener('click', function () { openCardDialog(c.id) })
+              holder.appendChild(open)
+              return holder
+            })),
+          ])
+        )
+      })
+
+      if (!shownGroups) {
+        listBox.appendChild(
+          emptyBox('没有匹配的卡牌', [
+            '没有卡牌的名字、系列或稀有度包含「' + state.collQuery + '」。',
+            '清空搜索框就会恢复全部 ' + allCards.length + ' 张。',
+          ])
+        )
+      }
+      foundNote.textContent = q
+        ? '找到 ' + shownCards + ' 张' + (shownGroups ? '（' + shownGroups + ' 组）' : '')
+        : '共 ' + allCards.length + ' 张 · ' + seriesNames.length + ' 个系列'
+    }
+
+    paint()
+
+    // 输入：只重画列表，输入框本身不动
+    searchInput.addEventListener('input', function () {
+      state.collQuery = searchInput.value
+      paint()
+    })
+    searchInput.addEventListener('keydown', function (ev) {
+      if (ev && ev.key === 'Escape' && searchInput.value) {
+        searchInput.value = ''
+        state.collQuery = ''
+        paint()
+      }
+    })
+
+    // 点标题收起/展开、点卡片看大图：**都直接绑在各自的节点上**（见 paint 里的注释，
+    // 委托要靠冒泡与 closest()，测试用的 shim 没有）。这里只剩两个全局按钮。
+
+    // 全部展开 / 全部收起
+    wrap.querySelectorAll('[data-coll]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var mode = b.getAttribute('data-coll')
+        var m = {}
+        if (mode === 'collapse') {
+          collectionGroups(allCards).forEach(function (g) {
+            if (g.kind === 'series') m[g.key] = true
+          })
+        }
+        state.collapsed = m
+        lsSet(LS.collapsed, m)
+        paint()
+      })
     })
 
     view.appendChild(wrap)
@@ -1342,25 +1527,26 @@
         ]),
       ])
 
-      // 兑卡
-      var cardBtn = el('button', {
+      // 合成：兑卡已改为**指定**，所以这里不再有「随机换一张」的按钮 ——
+      // 换哪张由图鉴决定。留一个随机入口会让人以为兑换还是随机的。
+      var goBtn = el('button', {
         class: 'btn primary',
         type: 'button',
-        'data-shard-action': 'card',
+        'data-shard-action': 'goto-collection',
         'data-rarity': row.rarity.id,
         disabled: row.canRedeemCard ? undefined : true,
-      }, ['兑换一张 ' + (row.rarity.label || row.rarity.id) + '（' + row.costForCard + '）'])
+      }, ['去图鉴选一张 ' + (row.rarity.label || row.rarity.id) + ' 合成']) 
 
       var cardHint
       if (row.canRedeemCard) {
-        cardHint = el('div', { class: 'shard-hint', text: '同档共 ' + row.cardCount + ' 张，兑换时随机给一张' })
+        cardHint = el('div', { class: 'shard-hint', text: '同档共 ' + row.cardCount + ' 张。到「图鉴」点开想换的那一张，下面就有合成按钮' })
       } else if (row.cardCount === 0) {
         cardHint = el('div', { class: 'shard-hint shard-hint-off', text: '这一档还没有任何卡牌，碎片换不了' })
       } else {
         cardHint = el('div', { class: 'shard-hint shard-hint-off', text: '还差 ' + row.missingForCard + ' 个碎片' })
       }
 
-      var actions = el('div', { class: 'shard-actions' }, [cardBtn, cardHint])
+      var actions = el('div', { class: 'shard-actions' }, [goBtn, cardHint])
 
       // 升档
       if (row.isTop) {
@@ -1407,20 +1593,33 @@
 
     view.querySelectorAll('[data-shard-action]').forEach(function (btn) {
       btn.addEventListener('click', function () {
-        doExchange(btn.getAttribute('data-rarity'), btn.getAttribute('data-shard-action'))
+        var action = btn.getAttribute('data-shard-action')
+        if (action === 'goto-collection') {
+          // 兑卡是指定的，所以这里只负责把人送到能选卡的地方
+          go('#/collection')
+          toast('点开想合成的那一张卡，大图下面有合成按钮', 'ok')
+          return
+        }
+        doExchange(btn.getAttribute('data-rarity'), action)
       })
     })
   }
 
-  /** 执行一次兑换。两条通路：动态站走服务端，静态站本地记账。 */
-  function doExchange(rarityId, action) {
+  /**
+   * 执行一次兑换。两条通路：动态站走服务端，静态站本地记账。
+   *
+   * @param {string} rarityId 碎片档位
+   * @param {'card'|'upgrade'} action
+   * @param {string} [cardId] action==='card' 时**必须**给（指定合成哪一张）
+   */
+  function doExchange(rarityId, action, cardId) {
     var S = window.GachaShards
     if (!S) {
       toast('碎片模块没有加载，无法兑换', 'error')
       return
     }
     // 先本地判一次：把「为什么换不了」立刻说出来，而不是等接口回一个 400
-    var check = S.canExchange(dataWithState(), rarityId, action)
+    var check = S.canExchange(dataWithState(), rarityId, action, cardId)
     if (!check.ok) {
       toast(check.error, 'error')
       return
@@ -1431,14 +1630,17 @@
         toast('需要先解锁编辑秘钥才能兑换（右上角「解锁」）', 'error')
         return
       }
-      request('/shards.json', { method: 'POST', body: { rarity: rarityId, action: action } })
+      var body = { rarity: rarityId, action: action }
+      if (action === 'card') body.cardId = cardId
+      request('/shards.json', { method: 'POST', body: body })
         .then(function (res) {
           if (res.player && state.data) state.data.player = res.player
           pushShardLog(rarityId, action, check.cost, res.card, res.gainedShard)
+          closeCardDialog()
           render()
           toast(
             action === 'card' && res.card
-              ? '兑换到 ' + res.card.name
+              ? '合成到 ' + res.card.name
               : '换到 1 个 ' + ((res.gainedShard && res.gainedShard.rarity) || '更高档') + ' 碎片',
             'ok'
           )
@@ -1450,7 +1652,7 @@
     }
 
     // 静态站：本地记账
-    var result = S.exchange(dataWithState(), rarityId, action)
+    var result = S.exchange(dataWithState(), rarityId, action, cardId)
     if (!result.ok) {
       toast(result.error, 'error')
       return
@@ -1466,9 +1668,10 @@
     applyStateToSnapshot({ owned: local.owned, shards: local.shards, duplicates: local.duplicates })
 
     pushShardLog(rarityId, action, result.cost, result.card, result.gainedShard)
+    closeCardDialog()
     render()
     toast(
-      result.card ? '兑换到 ' + result.card.name + '（记在这台浏览器上）' : '换到 1 个 ' + result.gainedShard.rarity + ' 碎片',
+      result.card ? '合成到 ' + result.card.name + '（记在这台浏览器上）' : '换到 1 个 ' + result.gainedShard.rarity + ' 碎片',
       'ok'
     )
   }
@@ -2254,6 +2457,108 @@
   }
 
   // -------------------------------------------------------------------------
+  // ⑦b 大图 / 合成弹层
+  // -------------------------------------------------------------------------
+
+  /**
+   * 点开图鉴里的一张卡：看大图，并在下面给出**合成**按钮。
+   *
+   * 为什么合成按钮放在这里而不是碎片页：兑卡已从「同档随机」改成「指定」，
+   * 而「哪一张」只能在图鉴里选。把按钮放到大图下面，人已经在看那张卡了，
+   * 顺手就能决定 —— 不用先回碎片页再想起要换哪张。
+   */
+  function openCardDialog(cardId) {
+    var dlg = state.els.cardDialog
+    var card = cardById(cardId)
+    if (!dlg) return
+    if (!card) {
+      toast('找不到这张卡：' + cardId, 'error')
+      return
+    }
+    state.cardOpen = card.id
+    paintCardDialog(card)
+    showModal(dlg)
+  }
+
+  function closeCardDialog() {
+    state.cardOpen = ''
+    hide(state.els.cardDialog)
+  }
+
+  function paintCardDialog(card) {
+    var S = window.GachaShards
+    var img = state.els.cardDialogImg
+    var nameEl = state.els.cardDialogName
+    var chips = state.els.cardDialogChips
+    var ownerEl = state.els.cardDialogOwner
+    var hintEl = state.els.cardDialogHint
+    var btn = state.els.cardDialogSynth
+
+    if (nameEl) nameEl.textContent = card.name || '未命名'
+    if (chips) {
+      clear(chips)
+      chips.appendChild(rarityChip(card.rarity, { big: true }))
+      if (card.series) chips.appendChild(el('span', { class: 'series-chip', text: card.series }))
+    }
+
+    // 大图：用卡面上同一份 URL（服务端 / 导出脚本算好的），前端不拼路径
+    var nofile = state.els.cardDialogNofile
+    if (img) {
+      if (card.imageUrl) {
+        img.hidden = false
+        img.src = card.imageUrl
+        img.alt = (card.name || '卡面') + ' 大图'
+      } else {
+        // 没有图不是错误，是「还没配」——要和大图读不到区分开
+        img.hidden = true
+        img.removeAttribute('src')
+        img.alt = ''
+      }
+    }
+    if (nofile) nofile.hidden = !!card.imageUrl
+
+    var n = Number(collection()[card.id] || 0)
+    if (ownerEl) {
+      ownerEl.textContent = n > 0 ? '已拥有 ×' + n : '还没有这张卡'
+      ownerEl.className = 'card-dialog-owner' + (n > 0 ? '' : ' card-dialog-owner-missing')
+    }
+
+    if (!btn) return
+    btn.setAttribute('data-card', card.id)
+    btn.setAttribute('data-rarity', card.rarity || '')
+
+    if (!S) {
+      btn.disabled = true
+      btn.textContent = '碎片模块没有加载'
+      if (hintEl) hintEl.textContent = 'page/shards.js 没加载成功，无法判断能不能合成。'
+      return
+    }
+
+    var check = S.canSynthesize(dataWithState(), card.id)
+    var r = rarityById(card.rarity)
+    var label = r ? r.label || r.id : card.rarity || '?'
+    var cost = S.rules(dataWithState()).costForCard
+
+    if (check.ok) {
+      btn.disabled = false
+      // 已拥有也能合成（用户确认过），但必须写明是「再合成一张」——
+      // 用 5 个碎片换一张不会变回碎片的重复卡，是纯亏，不写清楚就是坑人。
+      btn.textContent = n > 0
+        ? '再合成一张（已有 ×' + n + '）（' + cost + ' 个 ' + label + ' 碎片）'
+        : '合成这张卡（' + cost + ' 个 ' + label + ' 碎片）'
+      if (hintEl) {
+        var have = Number(((player().shards) || {})[card.rarity] || 0)
+        hintEl.textContent = '现有 ' + have + ' 个 ' + label + ' 碎片，合成后剩 ' + (have - cost) + ' 个。'
+      }
+      return
+    }
+
+    btn.disabled = true
+    btn.textContent = '暂时不能合成'
+    if (hintEl) hintEl.textContent = check.error
+  }
+
+  // -------------------------------------------------------------------------
   // ⑧ 秘钥对话框
   // -------------------------------------------------------------------------
 
@@ -2508,6 +2813,7 @@
     e.toast = document.getElementById('toast')
     e.unlockDialog = document.getElementById('unlock-dialog')
     e.pickDialog = document.getElementById('pick-dialog')
+    e.cardDialog = document.getElementById('card-dialog')
 
     // 缺失的绑定必须说出来 —— 否则只会表现成「某个角落不更新」，极难定位
     var REQUIRED = ['view', 'nav', 'brandTitle', 'warning', 'currency', 'shardChip', 'unlockBtn', 'lockBtn', 'toast']
@@ -2544,6 +2850,18 @@
       })
     }
     if (e.pickCancel) e.pickCancel.addEventListener('click', function () { hide(e.pickDialog) })
+    if (e.cardDialogClose) e.cardDialogClose.addEventListener('click', function () { closeCardDialog() })
+    if (e.cardDialogSynth) {
+      e.cardDialogSynth.addEventListener('click', function () {
+        var cardId = e.cardDialogSynth.getAttribute('data-card')
+        var rarityId = e.cardDialogSynth.getAttribute('data-rarity')
+        if (!cardId || !rarityId) return
+        doExchange(rarityId, 'card', cardId)
+      })
+    }
+    // 大图弹层被 Esc / 点遮罩关掉时，state.cardOpen 也要跟着清掉，
+    // 否则再点同一张卡会被误判成「已经开着」。
+    if (e.cardDialog) e.cardDialog.addEventListener('close', function () { state.cardOpen = '' })
     if (e.shardChip) {
       e.shardChip.addEventListener('click', function () { go('#/shards') })
     }
@@ -2611,6 +2929,10 @@
   function boot() {
     cacheEls()
     wire()
+    // 读者偏好：图鉴里收起了哪些系列组。读不出来就当作全部展开
+    // （宁可多显示也不要让人以为「这个系列的卡不见了」）。
+    var savedCollapsed = lsGet(LS.collapsed, null)
+    state.collapsed = savedCollapsed && typeof savedCollapsed === 'object' ? savedCollapsed : {}
     loadData()
       .then(function () {
         render()
