@@ -87,6 +87,8 @@
     anim: 'gacha.anim.v1',
     /** 图鉴里收起的系列组（也是读者偏好） */
     collapsed: 'gacha.collapsed.v1',
+    /** 选中的卡池（读者偏好：刷新之后要还在，否则「我选了群友池」会白选） */
+    pool: 'gacha.pool.v1',
   }
 
   var state = {
@@ -577,6 +579,66 @@
       .join('、')
   }
 
+  /**
+   * 切换卡池。**抽卡范围由它决定** —— 抽卡判定用的是池子的 `byRarity`。
+   *
+   * 选择存进 localStorage：不存的话刷新一次就掉回第一个池，
+   * 读者会以为自己「选了但没用」。数据里已经没有这个池时（被删了）
+   * 由 currentPool() 兜回第一个池，不会卡在空池上。
+   */
+  function selectPool(id) {
+    if (!id) return
+    var pools = (state.data && state.data.pools) || []
+    if (!pools.some(function (p) { return p.id === id })) return
+    if (state.poolId === id) return
+    state.poolId = id
+    lsSet(LS.pool, id)
+    render()
+  }
+
+  /**
+   * 卡池选择器。**抽卡页与卡池一览共用同一个** ——
+   * 两处各写一份的话，「能选」与「真的按它抽」迟早会对不上。
+   */
+  function poolPickerRow() {
+    var row = el('div', { class: 'pool-tabs' })
+    var pools = (state.data && state.data.pools) || []
+    var cur = currentPool() || {}
+    pools.forEach(function (p) {
+      var n = poolPlayableCount(p)
+      var b = el('button', {
+        class: 'tab' + (p.id === cur.id ? ' tab-on' : ''),
+        type: 'button',
+        'data-pool': p.id,
+        title: '可抽 ' + n + ' 张',
+      }, [p.name])
+      b.addEventListener('click', function () { selectPool(p.id) })
+      row.appendChild(b)
+    })
+    return row
+  }
+
+  /** 这个池子可抽多少张（服务端算好优先，老数据退回自己数） */
+  function poolPlayableCount(p) {
+    if (!p) return 0
+    if (p.playableCount != null) return Number(p.playableCount)
+    var n = 0
+    var buckets = p.byRarity || {}
+    for (var k in buckets) n += (buckets[k] || []).length
+    return n
+  }
+
+  /** 一句话说清「现在抽卡会抽到哪些卡」——范围必须让人看得见 */
+  function poolScopeLine(pool) {
+    if (!pool) return null
+    return el('div', { class: 'pool-scope' }, [
+      el('span', { class: 'pool-scope-key', text: '抽卡范围' }),
+      el('span', { class: 'pool-scope-name', text: pool.name }),
+      el('span', { class: 'pool-scope-count', text: poolPlayableCount(pool) + ' 张' }),
+      el('span', { class: 'pool-scope-series', text: seriesLabel(pool.series) }),
+    ])
+  }
+
   function rarityChip(rarityId, opts) {
     opts = opts || {}
     var r = rarityById(rarityId)
@@ -970,6 +1032,18 @@
       ])
     )
 
+    // ---- 选卡池：抽卡范围由它决定 -----------------------------------------
+    // 抽卡判定用的是池子的 `byRarity`，所以「选哪个池」就是「能抽到哪些卡」。
+    // 选择器必须放在抽卡键**上面**、并且把范围（系列 + 张数）写在旁边 ——
+    // 否则读者会以为抽的是「全部卡」，或者抽完才发现范围不对。
+    if (state.data.pools.length > 1) {
+      wrap.appendChild(el('div', { class: 'pool-pick' }, [
+        el('div', { class: 'pool-pick-label', text: '选择卡池' }),
+        poolPickerRow(),
+      ]))
+    }
+    if (pool) wrap.appendChild(poolScopeLine(pool))
+
     if (probs.length) {
       wrap.appendChild(
         el('div', { class: 'panel panel-warn' }, [
@@ -1119,15 +1193,7 @@
       return
     }
 
-    var poolPicker = el('div', { class: 'pool-tabs' })
-    state.data.pools.forEach(function (p) {
-      var b = el('button', {
-        class: 'tab' + (p.id === (currentPool() || {}).id ? ' tab-on' : ''),
-        type: 'button',
-        'data-pool': p.id,
-      }, [p.name])
-      poolPicker.appendChild(b)
-    })
+    var poolPicker = poolPickerRow()
     wrap.appendChild(poolPicker)
 
     var pool = currentPool()
@@ -1222,12 +1288,8 @@
       })
 
     view.appendChild(wrap)
-    wrap.querySelectorAll('[data-pool]').forEach(function (b) {
-      b.addEventListener('click', function () {
-        state.poolId = b.getAttribute('data-pool')
-        render()
-      })
-    })
+    // 切卡池的监听器已经绑在选择器内部（poolPickerRow），这里不用再委托一遍 ——
+    // 委托在测试用的 DOM shim 上根本不会触发（它不冒泡）。
   }
 
   // -------------------------------------------------------------------------
@@ -2979,7 +3041,9 @@
     if (inline) {
       state.data = normalizeSnapshot(inline)
       state.unlocked = false
-      state.poolId = state.data.pools && state.data.pools.length ? state.data.pools[0].id : ''
+      // ⚠️ 不能无条件覆盖：boot() 可能已经从 localStorage 恢复了读者选的池。
+      // 无条件赋值会让「上次选了群友池」在刷新后失效（表现成「选了没用」）。
+      if (!state.poolId && state.data.pools && state.data.pools.length) state.poolId = state.data.pools[0].id
       return Promise.resolve()
     }
     return request('/data.json')
@@ -3037,6 +3101,10 @@
     // （宁可多显示也不要让人以为「这个系列的卡不见了」）。
     var savedCollapsed = lsGet(LS.collapsed, null)
     state.collapsed = savedCollapsed && typeof savedCollapsed === 'object' ? savedCollapsed : {}
+    // 读者偏好：上次选的卡池。刷新后要还在，否则「我选了群友池」会白选。
+    // 数据里已经没有这个池时由 currentPool() 兜回第一个池。
+    var savedPool = lsGet(LS.pool, '')
+    if (savedPool) state.poolId = String(savedPool)
     loadData()
       .then(function () {
         render()

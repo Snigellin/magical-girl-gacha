@@ -1309,6 +1309,63 @@ textarea {
 }
 
 /* --------------------------------------------------------------------------
+   抽卡页的「选卡池」与「抽卡范围」
+   -------------------------------------------------------------------------- */
+
+.pool-pick {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.6rem;
+}
+
+.pool-pick-label {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+/* 抽卡范围必须显眼到「看一眼就知道这次会抽到哪些卡」 */
+.pool-scope {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.9rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 0.85rem;
+}
+
+.pool-scope-key {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.pool-scope-name {
+  font-weight: 700;
+}
+
+.pool-scope-count {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-scope-series {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+/* --------------------------------------------------------------------------
    卡池头：封面卡 + 系列清单 + 可抽张数
    -------------------------------------------------------------------------- */
 
