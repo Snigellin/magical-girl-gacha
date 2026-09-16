@@ -896,6 +896,27 @@
     return out
   }
 
+  /**
+   * 把 URL 变成绝对的。
+   *
+   * Cache Storage 里的**钥匙永远是绝对 URL**（浏览器按文档地址解析过，
+   * 且带上站点的子路径），而 `allImageUrls()` 给的是页面里那种相对地址
+   * （`assets/img/x.jpg`）。不归一化就直接比字符串，会得出「158 张一张都没缓存」
+   * —— 表现成按钮永远说「加载图片」，而且再按一次会把 158 张重新抓一遍。
+   *
+   * 兜底分支（没有 URL 构造器时）会退化成「原样返回」，于是两边形状可能对不上。
+   * **它的失效方向是安全的**：只会把已经在本地的那几张判成「还缺」、多抓一次，
+   * 绝不会反过来把没抓到的说成「已就绪」。
+   */
+  function absUrl(u) {
+    try {
+      var base = typeof location !== 'undefined' && location.href ? location.href : undefined
+      return new URL(String(u), base).href
+    } catch (e) {
+      return String(u)
+    }
+  }
+
   function fmtBytes(n) {
     var b = Number(n) || 0
     if (b < 1024) return b + ' B'
@@ -944,43 +965,100 @@
   }
 
   /**
-   * 把全部图片抓进缓存。
+   * 本地还缺哪些图（用绝对 URL 比对）。
+   *
+   * 只取一次 `keys()` 再在内存里比对，**不要**对 158 个 URL 各做一次
+   * `cache.match()` —— 那是 158 次异步查询，只为把按钮文案改一下。
+   */
+  function missingImageUrls() {
+    if (!cacheSupported()) return Promise.resolve(null)
+    var urls = allImageUrls()
+    return caches
+      .open(IMG_CACHE)
+      .then(function (cache) { return cache.keys() })
+      .then(function (keys) {
+        var have = {}
+        for (var i = 0; i < keys.length; i++) have[absUrl(keys[i].url)] = 1
+        return urls.filter(function (u) { return !have[absUrl(u)] })
+      })
+      .catch(function () { return null })
+  }
+
+  /**
+   * 把图片抓进缓存。
    *
    * **限并发 4**：一次丢出 130+ 个请求会把带宽抢光（页面自己的请求也会被挤掉），
    * 并发太高在移动端还容易整批失败。逐张推进并回报进度，读者才知道要等多久。
+   *
+   * `opts.force === true`（「强制重新下载」）时：
+   *   · 不跳过已有的，每张都重抓
+   *   · 请求带上 `cache: 'reload'`，绕过 HTTP 缓存**也绕过我们自己的 SW**
+   *     （`page/sw.js` 认这个标记）。不带的话 SW 会拿旧缓存直接回话，
+   *     这个按钮就只是看着像在干活。
+   *
+   * 返回值里的 `checked` 是「这一轮实际要抓几张」（0 表示本地已经齐了），
+   * `skipped` 是跳过了几张。调用方靠它区分「干完了」和「本来就不用干」。
    */
-  function cacheAllImages(onProgress) {
+  function cacheAllImages(onProgress, opts) {
+    opts = opts || {}
+    var force = !!opts.force
     if (!cacheSupported()) return Promise.resolve({ ok: false, error: '这个浏览器不支持 Cache Storage' })
     var urls = allImageUrls()
-    if (!urls.length) return Promise.resolve({ ok: true, done: 0, total: 0, failed: 0 })
+    if (!urls.length) return Promise.resolve({ ok: true, done: 0, total: 0, checked: 0, skipped: 0, failed: 0 })
     return caches
       .open(IMG_CACHE)
       .then(function (cache) {
-        var idx = 0
-        var done = 0
-        var failed = 0
-        var CONCURRENCY = 4
-        var worker = function () {
-          if (idx >= urls.length) return Promise.resolve()
-          var u = urls[idx++]
-          return fetch(u, { credentials: 'same-origin' })
-            .then(function (res) {
-              if (res && res.ok) {
-                return cache.put(u, res.clone()).then(function () { done++ })
-              }
-              failed++
-              return null
+        var pick = force
+          ? Promise.resolve(urls.slice())
+          : Promise.all(
+              urls.map(function (u) {
+                return cache
+                  .match(absUrl(u))
+                  .then(function (r) { return r ? null : u })
+                  .catch(function () { return u })
+              })
+            ).then(function (miss) {
+              return miss.filter(Boolean)
             })
-            .catch(function () { failed++ })
-            .then(function () {
-              if (onProgress) onProgress(done + failed, urls.length)
-              return worker()
-            })
-        }
-        var workers = []
-        for (var i = 0; i < CONCURRENCY; i++) workers.push(worker())
-        return Promise.all(workers).then(function () {
-          return { ok: true, done: done, total: urls.length, failed: failed }
+        return pick.then(function (todo) {
+          if (!todo.length) {
+            return { ok: true, done: 0, total: urls.length, checked: 0, skipped: urls.length, failed: 0 }
+          }
+          var idx = 0
+          var done = 0
+          var failed = 0
+          var CONCURRENCY = 4
+          var worker = function () {
+            if (idx >= todo.length) return Promise.resolve()
+            var u = todo[idx++]
+            var init = { credentials: 'same-origin' }
+            if (force) init.cache = 'reload'
+            return fetch(u, init)
+              .then(function (res) {
+                if (res && res.ok) {
+                  return cache.put(absUrl(u), res.clone()).then(function () { done++ })
+                }
+                failed++
+                return null
+              })
+              .catch(function () { failed++ })
+              .then(function () {
+                if (onProgress) onProgress(done + failed, todo.length)
+                return worker()
+              })
+          }
+          var workers = []
+          for (var i = 0; i < CONCURRENCY; i++) workers.push(worker())
+          return Promise.all(workers).then(function () {
+            return {
+              ok: true,
+              done: done,
+              total: urls.length,
+              checked: todo.length,
+              skipped: urls.length - todo.length,
+              failed: failed,
+            }
+          })
         })
       })
       .catch(function (err) {
@@ -989,6 +1067,97 @@
   }
 
   var cacheBusy = false
+
+  /**
+   * 顶栏那个「加载图片」按钮的文案。
+   *
+   * 三种状态：不支持 / 还差 N 张 / 全在本地。滚动到哪都看得见 ——
+   * 「先抓好图」这个动作必须在读者决定「我现在要开始看图了」的那一刻够得着，
+   * 而不是要先滑到页脚。
+   */
+  function paintCacheLoadButton() {
+    var btn = state.els.cacheLoad
+    if (!btn) return
+    if (cacheBusy) return // 抓取期间文案归 loadAllImages 管，别抢
+    if (!cacheSupported()) {
+      btn.textContent = '图片不能缓存'
+      btn.disabled = true
+      btn.title = '这个浏览器不支持 Cache Storage，图片每次打开都会重新下载'
+      return
+    }
+    btn.disabled = false
+    var urls = allImageUrls()
+    if (!urls.length) {
+      btn.textContent = '加载图片'
+      return
+    }
+    missingImageUrls().then(function (miss) {
+      // 异步回来时状态可能已经变了（读者又按了一次，或者换了板块）
+      if (cacheBusy || !btn) return
+      if (!miss) {
+        btn.textContent = '加载图片'
+        return
+      }
+      if (!miss.length) {
+        btn.textContent = '图片已就绪'
+        btn.className = 'btn ghost small cache-load is-done'
+        btn.title = '本站 ' + urls.length + ' 张图片都在本地，打开就是本地读取'
+      } else {
+        btn.textContent = miss.length === urls.length ? '加载图片' : '加载图片 ' + (urls.length - miss.length) + '/' + urls.length
+        btn.className = 'btn ghost small cache-load'
+        btn.title = '还有 ' + miss.length + ' 张图片不在本地，点一下全部抓好'
+      }
+    })
+  }
+
+  /**
+   * 一键加载：把还没在本地的图全部抓好，进度就地写在按钮上。
+   *
+   * 不弹对话框 —— 这个动作的全部意义就是「按一下，等一会儿」。
+   * 明细（状态 / 强制重新下载 / 清理）在页脚的「缓存设置」里。
+   */
+  function loadAllImages(force) {
+    if (cacheBusy) return
+    var btn = state.els.cacheLoad
+    if (!cacheSupported()) {
+      toast('这个浏览器不支持本地图片缓存，图片每次都会重新下载', 'error')
+      return
+    }
+    cacheBusy = true
+    if (btn) {
+      btn.disabled = true
+      btn.textContent = '准备中…'
+    }
+    cacheAllImages(
+      function (n, total) {
+        if (btn) btn.textContent = (force ? '重下中 ' : '加载中 ') + n + '/' + total
+      },
+      { force: force }
+    ).then(function (r) {
+      cacheBusy = false
+      if (btn) btn.disabled = false
+      if (!r.ok) {
+        if (btn) btn.textContent = '加载图片'
+        toast('图片加载失败：' + r.error, 'error')
+        return
+      }
+      if (!r.checked) {
+        // 本地已经齐了：绝不再把 158 张重新跑一遍
+        toast('本地已有全部 ' + r.total + ' 张图片，不用重新下载', 'ok')
+      } else {
+        toast(
+          r.failed
+            ? '加载完成，但有 ' + r.failed + ' 张失败'
+            : force
+              ? '已重新下载 ' + r.done + ' 张图片'
+              : '全部 ' + r.done + ' 张图片已存到本地，下次打开不用重新下载',
+          r.failed ? 'error' : 'ok'
+        )
+      }
+      paintCacheLoadButton()
+      if (state.els.cacheDialog && state.els.cacheDialog.open) paintCacheDialog()
+    })
+  }
 
   function openCacheDialog() {
     var dlg = state.els.cacheDialog
@@ -1002,11 +1171,13 @@
     var hint = state.els.cacheHint
     var fill = state.els.cacheFill
     var clear = state.els.cacheClear
+    var forceBtn = state.els.cacheForce
     var total = allImageUrls().length
     if (!cacheSupported()) {
       if (stat) stat.textContent = '这个浏览器不支持 Cache Storage —— 图片每次都会重新下载。'
       if (fill) fill.disabled = true
       if (clear) clear.disabled = true
+      if (forceBtn) forceBtn.disabled = true
       if (hint) hint.textContent = '换一个现代浏览器（Chrome / Edge / Firefox / Safari）就能用上图片缓存。'
       return
     }
@@ -1023,17 +1194,37 @@
   }
 
   function doCacheAll() {
+    runCacheFromDialog(false)
+  }
+
+  function doCacheForce() {
+    runCacheFromDialog(true)
+  }
+
+  /**
+   * 对话框里的「缓存全部图片 / 强制重新下载」。
+   *
+   * 与顶栏一键按钮共用 `cacheAllImages`（同一份规则）；
+   * 区别只有：这里的结果写在状态行与 toast 上，按钮在跑的时候要禁用。
+   */
+  function runCacheFromDialog(force) {
     if (cacheBusy) return
     cacheBusy = true
     var stat = state.els.cacheStat
     var fill = state.els.cacheFill
+    var forceBtn = state.els.cacheForce
     if (fill) fill.disabled = true
-    if (stat) stat.textContent = '开始缓存…'
-    cacheAllImages(function (n, total) {
-      if (stat) stat.textContent = '缓存中 ' + n + ' / ' + total + ' …'
-    }).then(function (r) {
+    if (forceBtn) forceBtn.disabled = true
+    if (stat) stat.textContent = force ? '强制重新下载…' : '开始缓存…'
+    cacheAllImages(
+      function (n, total) {
+        if (stat) stat.textContent = (force ? '重新下载 ' : '缓存中 ') + n + ' / ' + total + ' …'
+      },
+      { force: force }
+    ).then(function (r) {
       cacheBusy = false
       if (fill) fill.disabled = false
+      if (forceBtn) forceBtn.disabled = false
       if (!r.ok) {
         if (stat) stat.textContent = '缓存失败：' + r.error
         return
@@ -1043,7 +1234,19 @@
       // 用「已缓存 5 张 / 55 B」覆盖掉它，两条路径抢同一个文本节点，后写的赢。
       // （这正是最初那版的行为：完成提示一闪而过，测试也抓不到。）
       paintCacheDialog()
-      toast(r.failed ? '缓存完成，但有 ' + r.failed + ' 张失败' : '图片已缓存，下次打开不用重新下载', r.failed ? 'error' : 'ok')
+      paintCacheLoadButton()
+      if (!r.checked) {
+        toast('本地已有全部 ' + r.total + ' 张图片，不用重新下载', 'ok')
+        return
+      }
+      toast(
+        r.failed
+          ? '缓存完成，但有 ' + r.failed + ' 张失败'
+          : force
+            ? '已重新下载 ' + r.done + ' 张图片'
+            : '图片已缓存，下次打开不用重新下载',
+        r.failed ? 'error' : 'ok'
+      )
     })
   }
 
@@ -1052,8 +1255,10 @@
     if (!window.confirm('清掉本机缓存的图片？下次打开会重新下载（不会影响抽卡记录）。')) return
     clearImageCache().then(function (ok) {
       // 同上：清空的结果用 toast 说，状态行交给 paintCacheDialog 显示准确数字。
-      if (ok) paintCacheDialog()
-      else if (state.els.cacheStat) state.els.cacheStat.textContent = '清理失败（浏览器可能禁用了存储）。'
+      if (ok) {
+        paintCacheDialog()
+        paintCacheLoadButton()
+      } else if (state.els.cacheStat) state.els.cacheStat.textContent = '清理失败（浏览器可能禁用了存储）。'
       toast(ok ? '图片缓存已清空' : '清理失败', ok ? 'ok' : 'error')
     })
   }
@@ -3487,7 +3692,10 @@
     if (e.cacheBtn) e.cacheBtn.addEventListener('click', openCacheDialog)
     if (e.cacheClose) e.cacheClose.addEventListener('click', function () { hide(e.cacheDialog) })
     if (e.cacheFill) e.cacheFill.addEventListener('click', doCacheAll)
+    if (e.cacheForce) e.cacheForce.addEventListener('click', doCacheForce)
     if (e.cacheClear) e.cacheClear.addEventListener('click', doClearCache)
+    // 顶栏一键按钮：按下去立刻开始抓，进度就写在按钮自己身上
+    if (e.cacheLoad) e.cacheLoad.addEventListener('click', function () { loadAllImages(false) })
     if (e.shardChip) {
       e.shardChip.addEventListener('click', function () { go('#/shards') })
     }
@@ -3571,12 +3779,15 @@
     loadData()
       .then(function () {
         render()
+        // 顶栏「加载图片」的文案要看本地已经有多少张，数据到位后才能算
+        paintCacheLoadButton()
         var route = parseRoute()
         if (route.bad) window.location.hash = '#/draw'
       })
       .catch(function () {
         // loadData 已经画了错误面板，这里只保证顶栏还是有内容的
         renderNav()
+        paintCacheLoadButton()
       })
   }
 

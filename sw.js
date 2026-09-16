@@ -7,7 +7,9 @@
  *
  * Service Worker 是 Pages 上唯一能自己说了算的缓存层，于是：
  *   · 命中缓存就直接返回，一个字节都不下载
- *   · 页面上有「缓存全部图片」与「清理缓存」两个按钮（见 page.js）
+ *   · 页面上有「加载图片」（一键）/「强制重新下载」/「清理缓存」（见 page.js）
+ *   · `cache: 'reload'` 的请求**跳过读缓存**，但仍然把新响应写回去 ——
+ *     不认这个标记的话，页面上那个「强制重新下载」按钮就是假的。
  *
  * ---------------------------------------------------------------------------
  * 三条安全约束（这个文件碰错一点就会变成「页面永远不更新」的经典事故）
@@ -70,15 +72,23 @@ self.addEventListener('fetch', (event) => {
 
 async function cacheFirst(req) {
   const cache = await caches.open(CACHE_NAME)
+  // 「强制重新下载」：页面用 fetch(url, { cache: 'reload' }) 发请求。
+  // 不认这个标记的话，我们会照样拿旧缓存回话 —— 那个按钮就只是**看着**在干活。
+  // 注意只跳过「读」，抓回来的新响应仍然要写进缓存。
+  const force = req.cache === 'reload' || req.cache === 'no-cache'
   // ignoreSearch：万一以后带上 ?v=... 也能命中同一张
-  const hit = await cache.match(req, { ignoreSearch: true })
+  const hit = force ? null : await cache.match(req, { ignoreSearch: true })
   if (hit) return hit
   try {
+    // req 自带 cache 模式，所以 fetch(req) 本身就会绕过 HTTP 缓存
     const res = await fetch(req)
     // 只缓存「同源 + 200」的完整响应；206/opaque/错误一律不缓存
     if (res && res.ok && res.type === 'basic') {
       await trimCache(cache)
-      await cache.put(req, res.clone())
+      // 用 url.pathname 而不是 req 当钥匙：force 请求的 cache 模式是 reload，
+      // 直接 put(req) 有被规范挡掉的风险，而钥匙本来就该是「干净的地址」。
+      // 图片是内容寻址的（名字里带内容哈希），不带查询串，所以丢掉 search 无损。
+      await cache.put(urlOf(req), res.clone())
     }
     return res
   } catch (err) {
@@ -88,6 +98,12 @@ async function cacheFirst(req) {
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     })
   }
+}
+
+/** 缓存钥匙：绝对 URL，且不带查询串（与服务端下发的 src 一一对应） */
+function urlOf(req) {
+  const u = new URL(req.url)
+  return u.origin + u.pathname
 }
 
 async function trimCache(cache) {

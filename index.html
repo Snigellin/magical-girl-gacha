@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>魔法少女抽卡</title>
-<link rel="stylesheet" href="assets/page.css?v=a21726d1">
+<link rel="stylesheet" href="assets/page.css?v=a170d5fa">
 <link rel="stylesheet" href="assets/cards.css?v=9ea10d0d">
 <link rel="stylesheet" href="assets/reveal.css?v=b916f85a">
 <!--
@@ -48,6 +48,19 @@
     <nav class="nav" data-bind="nav" aria-label="主导航"></nav>
     <div class="bar-right">
       <span class="warn-chip" data-bind="warning" hidden></span>
+      <!--
+        一键加载图片：GitHub Pages 不允许自定义响应头，图片只有 max-age=600，
+        所以「先把图抓好」必须是读者能主动按的一个动作。
+        放在顶栏是因为顶栏是 sticky 的 —— 滚到哪都在，不用先滑到页脚。
+        按下去就地显示进度（12/158），不弹对话框；明细、强制重新下载与
+        清理缓存在页脚的「缓存设置」里。
+      -->
+      <button
+        type="button"
+        class="btn ghost small cache-load"
+        data-bind="cache-load"
+        title="把本站全部图片抓到本地，之后打开就不用重新下载了"
+      >加载图片</button>
       <button type="button" class="shard-chip" data-bind="shard-chip" hidden></button>
       <span class="cur-chip" data-bind="currency" hidden></span>
       <button type="button" class="btn ghost" data-bind="lock-btn" hidden>锁定</button>
@@ -65,8 +78,9 @@
       <!--
         图片缓存：GitHub Pages 不允许自定义响应头，图片只拿到 max-age=600，
         所以这里给读者一个「一次抓好 / 清掉重来」的入口。见 page/sw.js。
+        顶栏那个「加载图片」是一键版；这里放状态、强制重新下载与清理。
       -->
-      <button type="button" class="btn ghost small" data-bind="cache-btn">图片缓存</button>
+      <button type="button" class="btn ghost small" data-bind="cache-btn">缓存设置</button>
       <span class="foot-meta" data-bind="foot-meta"></span>
     </span>
   </div>
@@ -79,6 +93,7 @@
     <div class="cache-stat" data-bind="cache-stat"></div>
     <div class="dialog-actions">
       <button type="button" class="btn primary" data-bind="cache-fill">缓存全部图片</button>
+      <button type="button" class="btn" data-bind="cache-force">强制重新下载</button>
       <button type="button" class="btn" data-bind="cache-clear">清理缓存</button>
       <button type="button" class="btn ghost" data-bind="cache-close">关闭</button>
     </div>
@@ -154,6 +169,6 @@
 <script src="assets/draw.js?v=def2b296"></script>
 <script src="assets/shards.js?v=ea8e9f06"></script>
 <script src="assets/reveal.js?v=2ab38e28"></script>
-<script src="assets/page.js?v=8b74efd6"></script>
+<script src="assets/page.js?v=410a6a9a"></script>
 </body>
 </html>
