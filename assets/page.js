@@ -639,6 +639,188 @@
     ])
   }
 
+  /** 轮播滑动时长（与 page.css 的 .banner-track transition 对应） */
+  var BANNER_SLIDE_MS = 620
+
+  // 轮播的定时器与「这一代」标记。
+  // **必须能彻底停**：每次 render() 都会重建 DOM，旧定时器若不停，它会继续去改
+  // 已经不存在的节点；而且归位用的那个 setTimeout 如果在换板块时刚好在等，
+  // 它回来还会再起一个新定时器 —— 于是页面越用越多的隐形轮播。
+  // 用「代号（generation）」而不是只 clearInterval：代号能连带作废已排队的回调。
+  var bannerTimer = null
+  var bannerWrapTimer = null
+  var bannerGen = 0
+
+  function stopBannerTimer() {
+    bannerGen++
+    if (bannerTimer) {
+      clearInterval(bannerTimer)
+      bannerTimer = null
+    }
+    if (bannerWrapTimer) {
+      clearTimeout(bannerWrapTimer)
+      bannerWrapTimer = null
+    }
+  }
+
+  /** 读者是否要求「减少动态效果」——那就不要自动轮播，只留手动切换 */
+  function prefersReducedMotion() {
+    try {
+      return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+    } catch (e) {
+      return false
+    }
+  }
+
+  /**
+   * 卡池切换：侧面竖排的「封面（半透明）+ 卡池名」方块。
+   *
+   * 封面用**卡池自带的封面卡**（`coverCardUrl`）。半透明是**未选中**的状态，
+   * 选中的那个不透明并加一圈高亮 —— 用透明度而不是灰度，
+   * 是为了让几张封面并排时仍然认得出画的是什么。
+   */
+  function poolSwitcherColumn() {
+    var col = el('div', { class: 'draw-pools', role: 'tablist' })
+    var pools = (state.data && state.data.pools) || []
+    var cur = currentPool() || {}
+    pools.forEach(function (p) {
+      var on = p.id === cur.id
+      var tile = el('button', {
+        class: 'pool-tile' + (on ? ' is-on' : ''),
+        type: 'button',
+        role: 'tab',
+        'aria-selected': on ? 'true' : 'false',
+        'data-pool': p.id,
+        title: p.name + '（可抽 ' + poolPlayableCount(p) + ' 张）',
+      })
+      if (p.coverCardUrl) {
+        tile.appendChild(el('img', { class: 'pool-tile-img', src: p.coverCardUrl, alt: '', loading: 'lazy' }))
+      } else {
+        tile.appendChild(el('div', { class: 'pool-tile-noimg', text: '无封面' }))
+      }
+      tile.appendChild(el('span', { class: 'pool-tile-veil' }))
+      tile.appendChild(el('span', { class: 'pool-tile-name', text: p.name }))
+      tile.addEventListener('click', function () { selectPool(p.id) })
+      col.appendChild(tile)
+    })
+    return col
+  }
+
+  /**
+   * 卡池主视觉：多张时横向滑动轮播，每张展示 `bannerIntervalMs`（默认 3 秒）后
+   * 滚到下一张，循环。
+   *
+   * 循环的做法：轨道里放**两份**幻灯片，滑到第二份时瞬间归位到第一份
+   * （`transition: none` + 强制重排），视觉上就是无缝循环 ——
+   * 比「滑到末尾再倒着滑回来」自然，也不用把图片真的复制两份。
+   */
+  function bannerTrack(urls, pool) {
+    var count = urls.length
+    // 记下「我是哪一代」：换板块（render）会让代号 +1，这之后我所有的回调都要闭嘴。
+    var gen = bannerGen
+    var box = el('div', { class: 'banner-box' })
+    var track = el('div', { class: 'banner-track' })
+    var slides = count > 1 ? urls.concat(urls) : urls.slice()
+    slides.forEach(function (u, i) {
+      track.appendChild(
+        el('img', {
+          class: 'banner-slide',
+          src: u,
+          alt: (pool.name || '卡池') + ' 主视觉',
+          // 第一张立刻加载，其余懒加载 —— 否则一进页面就把 7 张大图全拉下来
+          loading: i === 0 ? 'eager' : 'lazy',
+        })
+      )
+    })
+    box.appendChild(track)
+
+    var idx = 0
+    // 每张幻灯片占容器整整一屏（`.banner-slide { flex: 0 0 100% }`），
+    // 所以位移就是「第几张 × 100%」—— 不需要知道一共几张。
+    var step = 100
+
+    function paint(i, animate) {
+      track.style.transition = animate ? '' : 'none'
+      track.style.transform = 'translateX(' + -(i * step) + '%)'
+      if (!animate) {
+        // 强制重排：否则「去掉过渡」和「设置位置」会被浏览器合并成一次动画，
+        // 归位那一下就会看到明显的倒滑。
+        void track.offsetWidth
+        track.style.transition = ''
+      }
+      for (var d = 0; d < dots.children.length; d++) {
+        dots.children[d].className = 'banner-dot' + (d === (i % count) ? ' is-on' : '')
+      }
+    }
+
+    var dots = el('div', { class: 'banner-dots' })
+    // 间隔**不在这里夹下限**：服务端的 normalizePool 已经保证 ≥1000ms。
+    // 两处都夹的话客户端这层就是重复政策，而且会把测试用的短间隔一起夹掉
+    //（表现成「轮播在测试里永远不前进」）。
+    var interval = Number(pool.bannerIntervalMs) > 0 ? Number(pool.bannerIntervalMs) : 3000
+
+    // 只认「我这一代」的回调：换板块会让代号 +1，旧回调就自动作废。
+    // 用闭包读外层的 gen（不是拷贝），所以 schedule() 重新认领之后依然有效。
+    function owned(fn) {
+      return function () {
+        if (gen !== bannerGen) return
+        return fn()
+      }
+    }
+
+    /**
+     * 起一轮定时器。会先清掉在跑的那个（并 +1 代号、作废已排队的归位回调），
+     * 再认领新代号 —— 不认领的话，下一次代号变化前自己就先被当成过期的了。
+     */
+    function schedule() {
+      stopBannerTimer()
+      gen = bannerGen
+      // 读者的「减少动态效果」优先：不自动轮播，圆点仍然可以手动切
+      if (count < 2 || prefersReducedMotion()) return
+      bannerTimer = setInterval(
+        owned(function () {
+          // 标签页在后台时不推进，回来时不会一次跳好几张
+          if (document.hidden) return
+          idx++
+          paint(idx, true)
+          if (idx < count) return
+          // 滑到「第二份的第一张」之后**先停表**：不停的话这 620ms 里
+          // 还会继续 idx++，直接滑出轨道外面（轨道只有两份幻灯片）。
+          stopBannerTimer()
+          gen = bannerGen
+          bannerWrapTimer = setTimeout(
+            owned(function () {
+              bannerWrapTimer = null
+              idx = 0
+              paint(0, false)
+              schedule() // 归位后接着循环
+            }),
+            BANNER_SLIDE_MS,
+          )
+        }),
+        interval,
+      )
+    }
+
+    if (count > 1) {
+      urls.forEach(function (u, i) {
+        var dot = el('button', { class: 'banner-dot' + (i === 0 ? ' is-on' : ''), type: 'button' })
+        dot.setAttribute('aria-label', '第 ' + (i + 1) + ' 张主视觉')
+        dot.addEventListener('click', function () {
+          idx = i
+          paint(idx, true)
+          schedule()
+        })
+        dots.appendChild(dot)
+      })
+      box.appendChild(dots)
+    }
+
+    paint(0, false)
+    schedule()
+    return box
+  }
+
   function rarityChip(rarityId, opts) {
     opts = opts || {}
     var r = rarityById(rarityId)
@@ -1032,16 +1214,70 @@
       ])
     )
 
-    // ---- 选卡池：抽卡范围由它决定 -----------------------------------------
+    // ---- 卡池舞台：侧面选池 + 主视觉轮播 + 右下角抽卡键 ---------------------
     // 抽卡判定用的是池子的 `byRarity`，所以「选哪个池」就是「能抽到哪些卡」。
-    // 选择器必须放在抽卡键**上面**、并且把范围（系列 + 张数）写在旁边 ——
-    // 否则读者会以为抽的是「全部卡」，或者抽完才发现范围不对。
-    if (state.data.pools.length > 1) {
-      wrap.appendChild(el('div', { class: 'pool-pick' }, [
-        el('div', { class: 'pool-pick-label', text: '选择卡池' }),
-        poolPickerRow(),
-      ]))
+    // 版面按用户给的参考图：侧面竖排卡池（封面+名），主视觉占满，抽卡键压右下角。
+    var stage = el('div', { class: 'draw-stage' })
+    if (state.data.pools.length > 1) stage.appendChild(poolSwitcherColumn())
+
+    var banner = el('div', { class: 'draw-banner' })
+    var bannerUrls = pool && pool.bannerUrls ? pool.bannerUrls : []
+    if (bannerUrls.length) {
+      banner.appendChild(bannerTrack(bannerUrls, pool))
+      // 有图却个别解析不出来时要说清楚，别让人怀疑「我放了三张怎么只轮播两张」
+      var brokenBanners = (pool.banners || []).filter(function (b) { return !b.url })
+      if (brokenBanners.length) {
+        banner.appendChild(
+          el('div', {
+            class: 'banner-warn',
+            text: brokenBanners.length + ' 张主视觉图找不到：' + brokenBanners.map(function (b) { return b.src }).join('、'),
+          })
+        )
+      }
+    } else {
+      // 没配主视觉时不能留一块空白：说清「可以放图」，而不是让人以为加载失败
+      banner.appendChild(
+        el('div', { class: 'banner-empty' }, [
+          el('div', { class: 'banner-empty-title', text: pool ? pool.name : '卡池' }),
+          el('div', { class: 'banner-empty-hint', text: '这个卡池还没有主视觉图。在后台把横幅文件填进卡池（图片放在受控的「卡池 UI 目录」里）。' }),
+        ])
+      )
     }
+
+    // 抽卡键：主视觉**右下角**，按 21:9 放大（比例写在 page.css 的 .draw-btn）
+    var cost1 = state.data.settings.pull.costSingle
+    var cost10 = g.costFor(state.data, 10)
+    var have = Number(player().currency || 0)
+    var disabled = probs.length > 0
+
+    banner.appendChild(
+      el('div', { class: 'draw-actions' }, [
+        el('button', {
+          class: 'btn draw-btn draw-btn-primary',
+          type: 'button',
+          'data-bind': 'draw1',
+          disabled: disabled || undefined,
+        }, [
+          el('span', { class: 'draw-btn-label', text: '单抽' }),
+          el('span', { class: 'draw-btn-cost', text: cost1 ? '×' + cost1 : '免费' }),
+        ]),
+        el('button', {
+          class: 'btn draw-btn',
+          type: 'button',
+          'data-bind': 'draw10',
+          disabled: disabled || undefined,
+        }, [
+          el('span', { class: 'draw-btn-label', text: '十连' }),
+          el('span', { class: 'draw-btn-cost', text: cost10 ? '×' + cost10 : '免费' }),
+        ]),
+      ])
+    )
+    // 现有券数压在主视觉左下角（与右下角的抽卡键相对）
+    banner.appendChild(el('span', { class: 'banner-have', text: '现有 ' + have + ' ' + (player().currencyName || '抽卡券') }))
+    stage.appendChild(banner)
+    wrap.appendChild(stage)
+
+    // 抽卡范围 + 出率表：信息仍然要能看到，但不再占主视觉的位置
     if (pool) wrap.appendChild(poolScopeLine(pool))
 
     if (probs.length) {
@@ -1068,33 +1304,11 @@
       )
     }
 
-    // 抽卡按钮
-    var cost1 = state.data.settings.pull.costSingle
-    var cost10 = g.costFor(state.data, 10)
-    var have = Number(player().currency || 0)
-    var disabled = probs.length > 0
-
-    var actions = el('div', { class: 'draw-actions' }, [
-      el('button', {
-        class: 'btn big primary',
-        type: 'button',
-        'data-bind': 'draw1',
-        disabled: disabled || undefined,
-      }, ['单抽' + (cost1 ? '（' + cost1 + '）' : '')]),
-      el('button', {
-        class: 'btn big',
-        type: 'button',
-        'data-bind': 'draw10',
-        disabled: disabled || undefined,
-      }, ['十连' + (cost10 ? '（' + cost10 + '）' : '')]),
-      el('span', { class: 'draw-have', text: '现有 ' + have + ' ' + (player().currencyName || '抽卡券') }),
-    ])
     // 动画开关：读者的偏好，存在他自己的浏览器里
     var animBox = el('input', { type: 'checkbox', 'data-bind': 'anim-toggle' })
     animBox.checked = animEnabled()
     var animLabel = el('label', { class: 'anim-toggle' }, [animBox, el('span', { text: '抽卡动画' })])
-    actions.appendChild(animLabel)
-    wrap.appendChild(actions)
+    wrap.appendChild(el('div', { class: 'draw-extra' }, [animLabel]))
 
     // 结果区
     if (state.last && state.last.results.length) {
@@ -2905,6 +3119,9 @@
 
   function render() {
     if (!state.data) return
+    // 上一次渲染留下的轮播定时器必须先停：它持有的是已经被换掉的 DOM 节点，
+    // 不停就每渲染一次多攒一个定时器，而且会去改已经不在页面上的元素。
+    stopBannerTimer()
     var route = parseRoute()
     state.route = route.route
     state.routeArg = route.arg
