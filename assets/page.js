@@ -548,6 +548,35 @@
     return pools[0]
   }
 
+  /**
+   * 某个卡池里、某个稀有度的卡牌对象列表。
+   *
+   * 成员判定**只用服务端算好的 `pool.byRarity`**，前端不自己按系列筛 ——
+   * 前后端各写一套筛选规则，迟早会出现「界面说这个池有这张卡、抽卡却抽不到」。
+   * 服务端没给 byRarity 时（老数据）退回全名册，保持旧行为。
+   */
+  function poolCardsOf(pool, rarityId) {
+    if (!pool) return []
+    var ids = pool.byRarity && pool.byRarity[rarityId]
+    if (!ids) return []
+    var out = []
+    for (var i = 0; i < ids.length; i++) {
+      var c = cardById(ids[i])
+      if (c) out.push(c)
+    }
+    return out
+  }
+
+  /** 卡池的系列说明文字（`常驻` 是「不属于任何系列」的哨兵，要说清楚） */
+  function seriesLabel(list) {
+    if (!list || !list.length) return '不限系列（收全部卡）'
+    return list
+      .map(function (s) {
+        return s === '常驻' ? '常驻（无系列）' : s
+      })
+      .join('、')
+  }
+
   function rarityChip(rarityId, opts) {
     opts = opts || {}
     var r = rarityById(rarityId)
@@ -1105,6 +1134,46 @@
     var summary = g ? g.poolSummary(state.data, pool.id) : null
     var rates = g ? g.rateTable(state.data, pool.id) : []
 
+    // ---- 卡池头：封面卡 + 收哪些系列 + 一共多少张 --------------------------
+    // 两个池子共用一部分系列（异界访客、常驻），只靠名字看不出区别，
+    // 所以把「封面 + 系列清单 + 可抽张数」摆出来，一眼能对上作者的设定。
+    if (pool) {
+      var coverNode
+      if (pool.coverCardUrl) {
+        coverNode = el('img', {
+          class: 'pool-cover-img',
+          src: pool.coverCardUrl,
+          alt: (pool.coverCard ? pool.coverCard.name : '') + ' 封面',
+          loading: 'lazy',
+        })
+      } else {
+        // 封面卡没配 / 名册里找不到时要说出来，不能留一块空白
+        coverNode = el('div', { class: 'pool-cover-empty', text: pool.coverMissing ? '封面卡不在名册里' : '未设封面' })
+      }
+      wrap.appendChild(
+        el('div', { class: 'pool-hero' }, [
+          el('div', { class: 'pool-cover' }, [coverNode]),
+          el('div', { class: 'pool-hero-body' }, [
+            el('div', { class: 'pool-hero-name' }, [pool.name]),
+            pool.desc ? el('div', { class: 'pool-hero-desc', text: pool.desc }) : null,
+            el('div', { class: 'pool-hero-line' }, [
+              el('span', { class: 'pool-hero-key', text: '封面' }),
+              el('span', { text: pool.coverCard ? pool.coverCard.name || pool.coverCard.id : '—' }),
+              pool.coverCard ? rarityChip(pool.coverCard.rarity) : null,
+            ]),
+            el('div', { class: 'pool-hero-line' }, [
+              el('span', { class: 'pool-hero-key', text: '系列' }),
+              el('span', { class: 'pool-hero-series', text: seriesLabel(pool.series) }),
+            ]),
+            el('div', { class: 'pool-hero-line' }, [
+              el('span', { class: 'pool-hero-key', text: '可抽' }),
+              el('span', { text: fmt(pool.playableCount == null ? (summary ? summary.total : 0) : pool.playableCount) + ' 张' }),
+            ]),
+          ]),
+        ])
+      )
+    }
+
     if (summary && !summary.total) {
       wrap.appendChild(
         emptyBox('这个卡池里一张卡都没有', [
@@ -1120,9 +1189,10 @@
         if (!row.count) return
         var rate = null
         for (var i = 0; i < rates.length; i++) if (rates[i].rarity.id === row.rarity.id) rate = rates[i]
-        var cards = state.data.cards.filter(function (c) {
-          return !c.hidden && c.rarityKnown && c.rarity === row.rarity.id
-        })
+        // ⚠️ 必须只列**这个池子里**的卡，不能按稀有度从全名册里筛。
+        // 全名册筛的话「卡池一览」会把不属于这个池的卡也画出来 —— 两个池子一分家
+        // 就会看出来（同一个档位在两边显示一模一样的卡），而抽卡时却抽不到它们。
+        var cards = poolCardsOf(pool, row.rarity.id)
         // 「出率 0.00%」和「抽不出」是两件事，不能混：
         //   · 权重 0 或没配 -> 这一档在这轮抽卡里根本抽不到
         //   · 真正在掷档里参与、只是概率低 -> 显示具体百分比
@@ -1932,13 +2002,33 @@
           input('number', p.weights && p.weights[r.id] !== undefined ? p.weights[r.id] : '', 'w-' + p.id + '-' + r.id, r.id)
         )
       })
+      // 系列清单 = 这个池子收哪些系列（一行一个 / 逗号分隔）。
+      // 「常驻」是「不属于任何系列」的哨兵 —— 美术目录里写的就是 `（常驻）`。
+      var seriesArea = el('textarea', { class: 'input series-input', rows: '4', spellcheck: 'false' })
+      seriesArea.value = (p.series || []).join('\n')
+      seriesArea.setAttribute('data-bind', 'pool-series-' + p.id)
+      // 封面的候选项就是名册里所有卡（按系列分组，方便找）
+      var coverSel = el('select', { class: 'input' })
+      coverSel.setAttribute('data-bind', 'pool-cover-' + p.id)
+      coverSel.appendChild(el('option', { value: '', text: '（不设封面）' }))
+      state.data.cards.forEach(function (c) {
+        var o = el('option', { value: c.id, text: (c.name || c.id) + '　' + (c.series ? '[' + c.series + ']' : '[常驻]') })
+        if (p.coverCardId === c.id) o.setAttribute('selected', '')
+        coverSel.appendChild(o)
+      })
+      var playableNow = Object.keys(p.byRarity || {}).reduce(function (n, k) {
+        return n + ((p.byRarity[k] || []).length)
+      }, 0)
       wrap.appendChild(
         el('div', { class: 'panel' }, [
           el('div', { class: 'panel-title' }, [
             el('span', { text: '卡池：' }),
             input('text', p.name, 'pool-name-' + p.id),
+            el('span', { class: 'panel-hint', text: '  可抽 ' + playableNow + ' 张' }),
           ]),
           field('说明', input('text', p.desc, 'pool-desc-' + p.id)),
+          field('收哪些系列（一行一个；「常驻」= 不属于任何系列；留空 = 收全部）', seriesArea),
+          field('封面卡', coverSel),
           el('div', { class: 'weight-grid' }, weightRows),
           el('div', { class: 'panel-actions' }, [
             el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-pool-' + p.id }, ['保存这个卡池']),
@@ -2264,9 +2354,23 @@
             if (v === '') return
             weights[r.id] = Number(v)
           })
+          var seriesEl = q('pool-series-' + p.id)
+          var series = seriesEl
+            ? seriesEl.value
+                .split(/[\n,，]+/)
+                .map(function (s) { return s.trim() })
+                .filter(function (s, i, arr) { return s && arr.indexOf(s) === i })
+            : []
+          var coverEl = q('pool-cover-' + p.id)
           request('/pool/' + encodeURIComponent(p.id), {
             method: 'PUT',
-            body: { name: q('pool-name-' + p.id).value, desc: q('pool-desc-' + p.id).value, weights: weights },
+            body: {
+              name: q('pool-name-' + p.id).value,
+              desc: q('pool-desc-' + p.id).value,
+              weights: weights,
+              series: series,
+              coverCardId: coverEl ? coverEl.value : '',
+            },
           })
             .then(function (res) { afterWrite(res, '卡池已保存') })
             .catch(fail)

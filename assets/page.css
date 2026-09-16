@@ -1309,6 +1309,99 @@ textarea {
 }
 
 /* --------------------------------------------------------------------------
+   卡池头：封面卡 + 系列清单 + 可抽张数
+   -------------------------------------------------------------------------- */
+
+.pool-hero {
+  display: flex;
+  gap: 0.9rem;
+  align-items: stretch;
+  margin: 0 0 1rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.pool-cover {
+  flex: 0 0 auto;
+  width: 6.5rem;
+}
+
+/* 封面用 2:3 的卡面比例（--card-ratio 由页面按数据设置），和卡牌一致 */
+.pool-cover-img {
+  display: block;
+  width: 100%;
+  aspect-ratio: var(--card-ratio, 832 / 1216);
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+
+/* 没封面 / 封面卡不在名册里时都要说清楚，不能留一块空白 */
+.pool-cover-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  width: 100%;
+  aspect-ratio: var(--card-ratio, 832 / 1216);
+  padding: 0.4rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.pool-hero-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  justify-content: center;
+}
+
+.pool-hero-name {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.pool-hero-desc {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.pool-hero-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  font-size: 0.84rem;
+}
+
+.pool-hero-key {
+  flex: 0 0 auto;
+  min-width: 2.4rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.pool-hero-series {
+  color: var(--text);
+  line-height: 1.6;
+}
+
+@media (max-width: 560px) {
+  .pool-cover {
+    width: 5rem;
+  }
+}
+
+/* --------------------------------------------------------------------------
    窄屏
    -------------------------------------------------------------------------- */
 
