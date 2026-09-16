@@ -722,14 +722,30 @@
     var track = el('div', { class: 'banner-track' })
     var slides = count > 1 ? urls.concat(urls) : urls.slice()
     slides.forEach(function (u, i) {
+      // 第一张立刻加载，其余懒加载 —— 否则一进页面就把 7 张大图全拉下来
+      var eager = i === 0 ? 'eager' : 'lazy'
+      // 一张幻灯片 = 模糊底 + 完整卡面两层。
+      // 横幅原图不一定正好是 16:9（「我与我的群友」那张是 3:2），用 cover 会把
+      // 上下各裁掉约 9%。所以卡面用 contain 完整显示，左右多出来的两条用
+      // **同一张图的模糊放大版**补满：不裁内容，也不是死板的黑边。
+      // 正好 16:9 的图（常驻池那 7 张）contain 之后铺满整框，模糊层完全看不见，
+      // 视觉上跟改之前一模一样。
+      // 两层用同一个 URL —— 浏览器只会下载一次。
       track.appendChild(
-        el('img', {
-          class: 'banner-slide',
-          src: u,
-          alt: (pool.name || '卡池') + ' 主视觉',
-          // 第一张立刻加载，其余懒加载 —— 否则一进页面就把 7 张大图全拉下来
-          loading: i === 0 ? 'eager' : 'lazy',
-        })
+        el('div', { class: 'banner-slide' }, [
+          el('img', {
+            class: 'banner-blur',
+            src: u,
+            alt: '',
+            loading: eager,
+          }),
+          el('img', {
+            class: 'banner-img',
+            src: u,
+            alt: (pool.name || '卡池') + ' 主视觉',
+            loading: eager,
+          }),
+        ])
       )
     })
     box.appendChild(track)

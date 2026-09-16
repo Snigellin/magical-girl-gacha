@@ -1464,11 +1464,38 @@ textarea {
   will-change: transform;
 }
 
+/* 一张幻灯片 = 模糊底 + 完整卡面两层。
+   横幅原图不一定是 16:9（「我与我的群友」那张是 3:2），cover 会裁掉上下约 18%
+   的画面，所以卡面改用 contain 完整显示，缺出来的两条用同图模糊放大补满。 */
 .banner-slide {
+  position: relative;
   flex: 0 0 100%;
   width: 100%;
   height: 100%;
+  overflow: hidden;
+}
+
+.banner-blur,
+.banner-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* 模糊底：铺满整框（cover），略微放大以免 blur 边缘露出一圈浅色 */
+.banner-blur {
+  position: absolute;
+  inset: 0;
   object-fit: cover;
+  object-position: center;
+  filter: blur(26px) saturate(1.2);
+  transform: scale(1.18);
+}
+
+/* 卡面：完整显示，绝不裁切。正好 16:9 的图会铺满整框，模糊层看不见。 */
+.banner-img {
+  position: relative;
+  object-fit: contain;
   object-position: center;
 }
 
