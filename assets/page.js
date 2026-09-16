@@ -83,6 +83,8 @@
     player: 'gacha.player.v1',
     collection: 'gacha.collection.v1',
     last: 'gacha.last.v1',
+    /** 抽卡动画开关（读者自己的偏好，不写服务端） */
+    anim: 'gacha.anim.v1',
   }
 
   var state = {
@@ -387,6 +389,35 @@
   function shards() {
     var p = player()
     return (p && p.shards) || {}
+  }
+
+  /** 表情包转发 URL：稀有度 id -> url（服务端/导出脚本算好，前端只读） */
+  function emojiUrls() {
+    var s = (state.data && state.data.settings) || {}
+    return s.emojiUrls || {}
+  }
+
+  /** 抽卡动画的配置（配色、背景暗度、开关默认值…） */
+  function revealConfig() {
+    var s = (state.data && state.data.settings) || {}
+    return s.reveal || {}
+  }
+
+  /**
+   * 动画现在开不开。
+   *
+   * 读者自己的选择（存在**他的浏览器**里）优先于数据里的默认值 ——
+   * 「要不要看动画」是每个人的偏好，不是站点的内容，所以不该写进服务端。
+   * 数据里的 `reveal.enabled` 只作为「从未选过时」的默认。
+   */
+  function animEnabled() {
+    var stored = lsGet(LS.anim, null)
+    if (stored === true || stored === false) return stored
+    return revealConfig().enabled !== false
+  }
+
+  function setAnimEnabled(on) {
+    lsSet(LS.anim, !!on)
   }
 
   /** 碎片规则（服务端/本地都要按同一份规则显示与判定） */
@@ -739,21 +770,63 @@
     })
 
     state.sinceTop = sinceTop
-    render()
 
     // 提示要把「拿到多少碎片」说出来，别让人自己去数
     var shardTotal = 0
     for (var k in settle.gainedShards) {
       if (Object.prototype.hasOwnProperty.call(settle.gainedShards, k)) shardTotal += settle.gainedShards[k]
     }
-    if (settle.duplicates > 0) {
-      toast(
-        (count > 1 ? '十连完成' : '抽到 ' + result.results[0].card.name) +
-          ' · ' + settle.duplicates + ' 张重复，转化为 ' + shardTotal + ' 个碎片',
-        'ok'
-      )
+    var toastText =
+      settle.duplicates > 0
+        ? (count > 1 ? '十连完成' : '抽到 ' + result.results[0].card.name) +
+          ' · ' + settle.duplicates + ' 张重复，转化为 ' + shardTotal + ' 个碎片'
+        : count > 1
+        ? '十连完成 · 全部是新卡！'
+        : '抽到新卡 ' + result.results[0].card.name
+
+    /**
+     * 动画放完（或没开动画时立刻）才渲染结果视图。
+     *
+     * 顺序很重要：先把 state.last 备好、但**不渲染**，让动画盖在抽卡页上；
+     * 动画结束再渲染 —— 否则结果会先闪一下再被弹层盖住。
+     */
+    var showResults = function () {
+      render()
+      toast(toastText, 'ok')
+    }
+
+    var revealMod = window.GachaReveal
+    if (animEnabled() && revealMod) {
+      var items = state.last.results.map(function (r) {
+        return {
+          rarityId: r.rarityId,
+          name: r.card && r.card.name,
+          // 复用 cardFigure：动画里翻开的正面就是真正的卡（含占位与「读不到图」提示）
+          faceEl: cardFigure(r.card, { size: 'lg' }),
+        }
+      })
+      revealMod
+        .play({
+          mode: count > 1 ? 'ten' : 'single',
+          items: items,
+          rarities: rarityList(),
+          reveal: revealConfig(),
+          emojiUrls: emojiUrls(),
+        })
+        .then(function (how) {
+          if (how === 'skipped') {
+            // 动画没播（被关掉、或系统设了「减少动态效果」）—— 正常回结果视图
+            console.info('[gacha] 抽卡动画未播放（%s），直接显示结果', how)
+          }
+          showResults()
+        })
+        .catch(function (err) {
+          // 动画出错绝不能把抽卡结果一起吞掉 —— 卡已经抽到了，必须让用户看到
+          console.error('[gacha] 抽卡动画出错，直接显示结果：', err)
+          showResults()
+        })
     } else {
-      toast(count > 1 ? '十连完成 · 全部是新卡！' : '抽到新卡 ' + result.results[0].card.name, 'ok')
+      showResults()
     }
 
     // --- 同步到服务端（仅动态站 + 已解锁） --------------------------------
@@ -885,6 +958,11 @@
       }, ['十连' + (cost10 ? '（' + cost10 + '）' : '')]),
       el('span', { class: 'draw-have', text: '现有 ' + have + ' ' + (player().currencyName || '抽卡券') }),
     ])
+    // 动画开关：读者的偏好，存在他自己的浏览器里
+    var animBox = el('input', { type: 'checkbox', 'data-bind': 'anim-toggle' })
+    animBox.checked = animEnabled()
+    var animLabel = el('label', { class: 'anim-toggle' }, [animBox, el('span', { text: '抽卡动画' })])
+    actions.appendChild(animLabel)
     wrap.appendChild(actions)
 
     // 结果区
@@ -900,8 +978,22 @@
       var grid = el('div', { class: 'grid cards' })
       var dupCount = 0
       var shardGain = 0
-      state.last.results.forEach(function (item) {
+      // 结果按**稀有度从高到低**排（同档保持抽到的先后）。
+      // 用 reveal.js 的排序，两个视图的规则就是同一份实现。
+      var rev = window.GachaReveal
+      var ordered = rev
+        ? rev.sortByRarity(state.last.results, rarityList())
+        : state.last.results.slice()
+      // 哪些档位的卡要发光：与「弹表情包」用同一张表（都是「值得庆祝的档位」）
+      var glowList = revealConfig().emojiRarities || ['UR', '???']
+      ordered.forEach(function (item) {
         var holder = el('div', { class: 'result-cell' })
+        if (glowList.indexOf(item.rarityId) >= 0) {
+          holder.classList.add('result-glow')
+          // 越高的档位光越强（??? 比 UR 更亮），用 rank 递推
+          var rk = rev ? rev.rankOf(item.rarityId, rarityList()) : 1
+          holder.style.setProperty('--glow-step', String(Math.max(1, rk - 1)))
+        }
         holder.appendChild(cardFigure(item.card, { size: 'lg' }))
         if (item.isNew) {
           holder.appendChild(el('div', { class: 'badge-new', text: 'NEW' }))
@@ -942,6 +1034,16 @@
     if (cr) cr.addEventListener('click', function () { state.last = null; render() })
     var ga = view.querySelector('[data-bind="goto-admin2"]')
     if (ga) ga.addEventListener('click', function () { go('#/admin') })
+
+    // 动画开关：勾选立刻生效并记住（存在浏览器里，不管动态站还是静态站都一样）
+    var toggle = view.querySelector('[data-bind="anim-toggle"]')
+    if (toggle) {
+      toggle.addEventListener('change', function () {
+        var on = !!toggle.checked
+        setAnimEnabled(on)
+        toast(on ? '抽卡动画已打开' : '抽卡动画已关闭（抽卡结果照常显示）', 'ok')
+      })
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -1,0 +1,437 @@
+/* ==========================================================================
+   reveal.css — 抽卡动画
+   --------------------------------------------------------------------------
+   纯色发光卡 → 翻牌 → 逐张揭示。与 cards.css 的分工：
+     · cards.css  管静态卡牌（网格、卡面比例、稀有度配色）
+     · reveal.css 管动画（暗背景、纯色卡、牌堆、翻牌、表情包）
+
+   ⚠️ 页面 CSP 是 style-src 'self'（无 unsafe-inline）：
+     这里只写类，动态值（颜色、暗度、放大倍率）由 JS 通过 CSSOM 写成
+     自定义属性，例如 overlay.style.setProperty('--rv-backdrop', '0.68')。
+     绝不通过 setAttribute('style', ...) —— 那会被浏览器静默丢掉。
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   弹层
+   -------------------------------------------------------------------------- */
+
+.rv-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 品质越高越暗：--rv-backdrop 由 JS 按稀有度算好写进来 */
+  background: rgba(6, 4, 12, var(--rv-backdrop, 0.5));
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  /* 触屏上拖动牌堆时不要顺带滚动页面 */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+
+.rv-overlay.is-in {
+  opacity: 1;
+}
+
+.rv-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   牌堆
+   -------------------------------------------------------------------------- */
+
+.rv-stack {
+  position: relative;
+  /* 拖动要揭的那张是 UR/??? 时会放大（.rv-stack-hype 由 JS 加上） */
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  transform-origin: center center;
+}
+
+.rv-stack-hype {
+  /* 放大本身由 JS 的 transform 控制；这里只提高过渡的手感 */
+  transition: transform 0.16s ease-out;
+}
+
+.rv-card {
+  position: relative;
+  width: min(46vw, 260px);
+  aspect-ratio: var(--card-ratio, 2 / 3);
+  perspective: 1200px;
+  transform-origin: center center;
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.28s ease;
+  will-change: transform, opacity;
+}
+
+/* 牌堆里的卡：越靠下越略微缩小并错开一点，让「一叠牌」看得出来 */
+.rv-stack .rv-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  margin-left: calc(min(46vw, 260px) / -2);
+  margin-top: calc(min(46vw, 260px) / -2 * (3 / 2));
+  transform: scale(calc(1 - var(--rv-i, 0) * 0.014)) translateY(calc(var(--rv-i, 0) * 2.5px));
+}
+
+/* 单抽那张是唯一的卡，居中显示 */
+.rv-card.rv-single {
+  position: relative;
+  left: auto;
+  top: auto;
+  margin: 0;
+}
+
+/* 拖动中的卡不做过渡（要跟手） */
+.rv-card.rv-dragging {
+  transition: none;
+}
+
+/* 移走 */
+.rv-card.rv-out {
+  opacity: 0;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 1, 1), opacity 0.3s ease;
+}
+
+/* --------------------------------------------------------------------------
+   翻牌：背面 = 纯色发光卡，正面 = 实际卡图
+   -------------------------------------------------------------------------- */
+
+.rv-flip {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  transition: transform 0.52s cubic-bezier(0.3, 1.2, 0.4, 1);
+}
+
+.rv-card.is-revealed .rv-flip {
+  transform: rotateY(180deg);
+}
+
+.rv-back,
+.rv-front {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  overflow: hidden;
+}
+
+/* 纯色发光卡：颜色与光晕强度都由数据驱动 */
+.rv-back {
+  background: var(--rv-color, #fff);
+  box-shadow:
+    0 0 calc(20px * var(--rv-glow, 1)) var(--rv-color, #fff),
+    0 0 calc(56px * var(--rv-glow, 1)) var(--rv-color, #fff),
+    inset 0 0 calc(30px * var(--rv-glow, 1)) rgba(255, 255, 255, 0.55),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.7);
+  animation: rv-breathe 1.6s ease-in-out infinite;
+}
+
+/* 品质越高呼吸越明显（--rv-glow 也更大） */
+@keyframes rv-breathe {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.18);
+  }
+}
+
+.rv-front {
+  transform: rotateY(180deg);
+  background: var(--panel, #fff);
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+/* 翻开的卡面：直接复用 cardFigure 的输出，让它铺满这张动画卡 */
+.rv-front > * {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.rv-face-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted, #666);
+  font-size: 0.9rem;
+}
+
+/* 空白卡牌（牌堆最上方那张） */
+.rv-back-blank {
+  background: linear-gradient(150deg, #2a2540, #17131f 60%, #221c33);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.16), 0 10px 30px rgba(0, 0, 0, 0.45);
+  animation: none;
+}
+
+.rv-back-blank::after {
+  content: '✦';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  color: rgba(255, 255, 255, 0.22);
+}
+
+/* 移走时如果是「让位给出大货」，边缘先亮起来 */
+.rv-card.rv-out-hype .rv-back {
+  animation: rv-hype 0.3s ease-out;
+}
+
+@keyframes rv-hype {
+  from {
+    filter: brightness(1.5);
+  }
+  to {
+    filter: brightness(1);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   牌堆边缘的光：本次出现了 UR / ??? 时隐约透出来
+   -------------------------------------------------------------------------- */
+
+.rv-overlay[data-edge='UR'] .rv-stack::before,
+.rv-overlay[data-edge='???'] .rv-stack::before {
+  content: '';
+  position: absolute;
+  inset: -14px;
+  border-radius: 22px;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 55%,
+    color-mix(in srgb, var(--rv-edge) 42%, transparent) 100%
+  );
+  box-shadow: 0 0 44px 6px var(--rv-edge);
+  opacity: 0.75;
+  animation: rv-edge 2s ease-in-out infinite;
+}
+
+.rv-overlay[data-edge='???'] .rv-stack::before {
+  /* ??? 比 UR 更旺盛 */
+  opacity: 0.95;
+  box-shadow: 0 0 70px 12px var(--rv-edge);
+}
+
+@keyframes rv-edge {
+  0%,
+  100% {
+    filter: brightness(0.9);
+  }
+  50% {
+    filter: brightness(1.25);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   表情包
+   -------------------------------------------------------------------------- */
+
+.rv-emoji {
+  position: absolute;
+  top: 6%;
+  left: 50%;
+  transform: translateX(-50%) scale(0.7);
+  opacity: 0;
+  transition: transform 0.26s cubic-bezier(0.2, 1.5, 0.4, 1), opacity 0.22s ease;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.rv-emoji.is-in {
+  opacity: 1;
+  transform: translateX(-50%) scale(1);
+}
+
+.rv-emoji img {
+  max-width: min(56vw, 300px);
+  max-height: 34vh;
+  display: block;
+  filter: drop-shadow(0 6px 26px rgba(0, 0, 0, 0.5));
+}
+
+.rv-emoji-err {
+  font-size: 0.8rem;
+  color: #ffd7d7;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 8px;
+  padding: 0.3rem 0.6rem;
+}
+
+/* --------------------------------------------------------------------------
+   提示与进度
+   -------------------------------------------------------------------------- */
+
+.rv-hints {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 5vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  pointer-events: none;
+}
+
+.rv-hint {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.9rem;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
+}
+
+.rv-progress {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
+}
+
+/* 全部揭示完之后给个更明显的提示 */
+.rv-overlay[data-done='1'] .rv-hint {
+  animation: rv-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes rv-pulse {
+  0%,
+  100% {
+    opacity: 0.75;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   跳过按钮（弹层里的唯一出口；页面上的按钮被弹层盖住点不到）
+   -------------------------------------------------------------------------- */
+
+.rv-skip {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 6;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(0, 0, 0, 0.32);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+}
+
+.rv-skip:hover {
+  background: rgba(0, 0, 0, 0.5);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+/* --------------------------------------------------------------------------
+   单抽：卡牌居中，稍微大一点
+   -------------------------------------------------------------------------- */
+
+.rv-overlay[data-mode='single'] .rv-card {
+  width: min(52vw, 300px);
+}
+
+/* --------------------------------------------------------------------------
+   动画开关（抽卡页上的那个小控件）
+   -------------------------------------------------------------------------- */
+
+.anim-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.anim-toggle input {
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* --------------------------------------------------------------------------
+   结果视图：UR / ??? 的卡发光
+   -------------------------------------------------------------------------- */
+
+.result-cell.result-glow .card {
+  border-color: var(--rarity-color, var(--accent));
+  box-shadow:
+    0 0 0 1px var(--rarity-color, var(--accent)),
+    0 0 calc(14px + 6px * var(--glow-step, 1)) -2px var(--rarity-color, var(--accent));
+  animation: result-glow 2.2s ease-in-out infinite;
+}
+
+@keyframes result-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px var(--rarity-color, var(--accent)),
+      0 0 calc(14px + 6px * var(--glow-step, 1)) -2px var(--rarity-color, var(--accent));
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px var(--rarity-color, var(--accent)),
+      0 0 calc(22px + 8px * var(--glow-step, 1)) -2px var(--rarity-color, var(--accent));
+  }
+}
+
+/* --------------------------------------------------------------------------
+   尊重「减少动态效果」
+   --------------------------------------------------------------------------
+   JS 层已经在 prefers-reduced-motion 时直接跳过动画；这里再把残余的过渡
+   与循环动画关掉，避免「跳过了动画但结果视图还在闪」。
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .rv-flip,
+  .rv-card,
+  .rv-stack,
+  .rv-overlay,
+  .rv-emoji {
+    transition-duration: 0.01ms !important;
+  }
+  .rv-back,
+  .rv-overlay[data-edge] .rv-stack::before,
+  .rv-overlay[data-done='1'] .rv-hint,
+  .result-cell.result-glow .card {
+    animation: none !important;
+  }
+}
+
+/* 窄屏：牌堆别太大 */
+@media (max-width: 560px) {
+  .rv-card {
+    width: min(62vw, 220px);
+  }
+  .rv-overlay[data-mode='single'] .rv-card {
+    width: min(70vw, 240px);
+  }
+  .rv-hints {
+    bottom: 3vh;
+  }
+}
