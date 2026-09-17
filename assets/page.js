@@ -69,6 +69,10 @@
     console.warn('[gacha] 配置里既没有 readonly 也没有 backend —— 页面会按动态站处理，请检查注入的配置。')
   }
 
+  var GITEE_RAW = 'https://gitee.com/qq1292012789/magical-girl-gacha/raw/main/'
+  var GITHUB_REPO = 'https://github.com/Snigellin/magical-girl-gacha'
+  var GITHUB_RAW = GITHUB_REPO.replace('github.com/', 'raw.githubusercontent.com/') + '/main/'
+
   var SECTIONS = [
     { id: 'draw', label: '抽卡', hash: '#/draw' },
     // 「卡池一览」已删除：它展示的就是图鉴一级分组（卡池）的内容，功能重复。
@@ -847,7 +851,7 @@
   // 「看缓存状态 / 一次抓好 / 清掉重来」三件事。
 
   /** 缓存名必须与 page/sw.js 里的 CACHE_NAME 一致 */
-  var IMG_CACHE = 'gacha-img-v1'
+  var IMG_CACHE = 'gacha-img-v2'
 
   function cacheSupported() {
     try {
@@ -1030,11 +1034,15 @@
           var worker = function () {
             if (idx >= todo.length) return Promise.resolve()
             var u = todo[idx++]
-            var init = { credentials: 'same-origin' }
+            var init = {}
+            if (u.indexOf(GITEE_RAW) === 0 || u.indexOf(GITHUB_RAW) === 0) {
+              init.mode = 'no-cors'
+              init.credentials = 'omit'
+            }
             if (force) init.cache = 'reload'
             return fetch(u, init)
               .then(function (res) {
-                if (res && res.ok) {
+                if (res && (res.ok || res.type === 'opaque')) {
                   return cache.put(absUrl(u), res.clone()).then(function () { done++ })
                 }
                 failed++
@@ -3403,10 +3411,36 @@
     }
   }
 
+  function mirrorRepoImages(v) {
+    if (Array.isArray(v)) {
+      for (var i = 0; i < v.length; i++) v[i] = mirrorRepoImages(v[i])
+      return v
+    }
+    if (v && typeof v === 'object') {
+      for (var k in v) v[k] = mirrorRepoImages(v[k])
+      return v
+    }
+    return typeof v === 'string' && /^(?:\.\/)?assets\/img\//.test(v) ? GITEE_RAW + v.replace(/^\.\//, '') : v
+  }
+
+  function onImageResourceError(event) {
+    var img = event.target
+    if (!img || img.tagName !== 'IMG') return
+    var src = img.getAttribute('src') || ''
+    var m = src.match(/(?:^|\/)(assets\/img\/[^/]+)$/)
+    if (!m) return
+    if (src.indexOf(GITEE_RAW) === 0) img.setAttribute('src', GITHUB_RAW + m[1])
+    else if (src.indexOf(GITHUB_RAW) === 0) img.setAttribute('src', m[1])
+    else return
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
   /** 服务端回传的快照缺少派生字段时补齐，保证渲染代码只管读 */
   function normalizeSnapshot(data) {
     if (!data) return state.data
     if (!data.cards) data.cards = []
+    mirrorRepoImages(data)
     return data
   }
 
@@ -3864,6 +3898,7 @@
 
   function wire() {
     var e = state.els
+    window.addEventListener('error', onImageResourceError, true)
     if (e.unlockBtn) e.unlockBtn.addEventListener('click', openUnlock)
     if (e.lockBtn) {
       e.lockBtn.addEventListener('click', function () {
