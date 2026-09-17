@@ -2878,6 +2878,15 @@
       var playableNow = Object.keys(p.byRarity || {}).reduce(function (n, k) {
         return n + ((p.byRarity[k] || []).length)
       }, 0)
+      // 排除规则：一行一条，`系列` 或 `系列:档位1,档位2`。
+      // 例：`常驻:SR,SSR` = 收「常驻」这个系列，但不要它的 SR 与 SSR。
+      var excludeArea = el('textarea', { class: 'input series-input', rows: '2', spellcheck: 'false', 'data-bind': 'pool-exclude-' + p.id })
+      excludeArea.value = (p.exclude || [])
+        .map(function (r) {
+          var rs = Array.isArray(r.rarities) ? r.rarities : []
+          return rs.length ? r.series + ':' + rs.join(',') : r.series
+        })
+        .join('\n')
       wrap.appendChild(
         el('div', { class: 'panel' }, [
           el('div', { class: 'panel-title' }, [
@@ -2887,6 +2896,7 @@
           ]),
           field('说明', input('text', p.desc, 'pool-desc-' + p.id)),
           field('收哪些系列（一行一个；「常驻」= 不属于任何系列；留空 = 收全部）', seriesArea),
+          field('不要哪些（一行一个：`系列` 或 `系列:档位1,档位2`，例 `常驻:SR,SSR`；留空 = 不排除）', excludeArea),
           field('封面卡', coverSel),
           el('div', { class: 'weight-grid' }, weightRows),
           el('div', { class: 'panel-actions' }, [
@@ -3290,6 +3300,41 @@
                 .map(function (s) { return s.trim() })
                 .filter(function (s, i, arr) { return s && arr.indexOf(s) === i })
             : []
+          // 排除规则：`系列` 或 `系列:档位1,档位2`。
+          // ⚠️ 解析失败要**拦住并说清哪一行**，不能猜着往下走 ——
+          // 猜错的后果是「某些卡悄悄从池子里消失」，而页面上看不出任何异常。
+          var excludeEl = q('pool-exclude-' + p.id)
+          var exclude = []
+          if (excludeEl) {
+            var knownRar = {}
+            rarityList().forEach(function (r) {
+              knownRar[r.id] = 1
+              if (r.label) knownRar[r.label] = 1
+            })
+            var lines = excludeEl.value.split('\n')
+            for (var li = 0; li < lines.length; li++) {
+              var line = lines[li].trim()
+              if (!line) continue
+              var parts = line.split(/[:：]/)
+              var sName = parts[0].trim()
+              if (!sName) {
+                window.alert('第 ' + (li + 1) + ' 行没写系列名：' + line)
+                return
+              }
+              var rar = []
+              if (parts.length > 1) {
+                var names = parts[1].split(/[,，]/).map(function (x) { return x.trim() }).filter(Boolean)
+                for (var ri = 0; ri < names.length; ri++) {
+                  if (!knownRar[names[ri]]) {
+                    window.alert('第 ' + (li + 1) + ' 行的档位「' + names[ri] + '」不在档位表里（可用的：' + rarityList().map(function (r) { return r.label || r.id }).join(' / ') + '）')
+                    return
+                  }
+                  rar.push(names[ri])
+                }
+              }
+              exclude.push({ series: sName, rarities: rar })
+            }
+          }
           var coverEl = q('pool-cover-' + p.id)
           request('/pool/' + encodeURIComponent(p.id), {
             method: 'PUT',
@@ -3298,6 +3343,7 @@
               desc: q('pool-desc-' + p.id).value,
               weights: weights,
               series: series,
+              exclude: exclude,
               coverCardId: coverEl ? coverEl.value : '',
             },
           })
