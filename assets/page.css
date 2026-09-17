@@ -1275,6 +1275,81 @@ textarea {
   display: none;
 }
 
+/* --------------------------------------------------------------------------
+   图鉴的两级分组：一级 = 卡池，二级 = 系列
+   --------------------------------------------------------------------------
+   各级都有封面，**点封面就是展开/收起**（整个标题都是按钮，封面在按钮里面）。
+   一级的封面用卡池封面，二级的用该系列里最高稀有度的第一张卡。 */
+.group-pool {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.group-body {
+  display: grid;
+  gap: 0.7rem;
+}
+
+/* 一级收起时整块二级都收起来（平铺的一级组里直接是 .grid.cards，由上面那条管） */
+.group-pool.is-collapsed > .group-body {
+  display: none;
+}
+
+/* 二级比一级淡一档，层次靠底色而不是边框粗细来区分 */
+.group-series {
+  background: var(--panel-2);
+  box-shadow: none;
+  padding: 0.7rem;
+}
+
+.group-cover {
+  flex: 0 0 auto;
+  display: block;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+
+.pool-cover {
+  width: 3.1rem;
+  aspect-ratio: 2 / 3;
+}
+
+.series-cover {
+  width: 1.9rem;
+  aspect-ratio: 2 / 3;
+}
+
+.group-cover-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 没有封面图时画一个字，别留空洞（留下空洞会被当成「图加载失败」） */
+.group-cover-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.pool-name {
+  font-weight: 700;
+  font-size: 1.02rem;
+}
+
+/* 名字 / 计数 / 说明 三件套：整体换行，不要各自散开 */
+.group-text {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 /* 点开看大图：覆盖整格的按钮，命中区域大才不会点空。
    视觉上透明，只有悬停/聚焦时才提示「看大图」。 */
 .coll-open {

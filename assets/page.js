@@ -71,7 +71,8 @@
 
   var SECTIONS = [
     { id: 'draw', label: '抽卡', hash: '#/draw' },
-    { id: 'pool', label: '卡池一览', hash: '#/pool' },
+    // 「卡池一览」已删除：它展示的就是图鉴一级分组（卡池）的内容，功能重复。
+    // 想按卡池看牌 → 图鉴里按卡池收起/展开。
     { id: 'collection', label: '图鉴', hash: '#/collection' },
     { id: 'shards', label: '碎片兑换', hash: '#/shards' },
     { id: 'history', label: '抽卡记录', hash: '#/history' },
@@ -565,20 +566,26 @@
   }
 
   /**
-   * 某个卡池里、某个稀有度的卡牌对象列表。
+   * 某个卡池里的全部卡牌对象。
    *
    * 成员判定**只用服务端算好的 `pool.byRarity`**，前端不自己按系列筛 ——
    * 前后端各写一套筛选规则，迟早会出现「界面说这个池有这张卡、抽卡却抽不到」。
-   * 服务端没给 byRarity 时（老数据）退回全名册，保持旧行为。
+   * 服务端没给 byRarity 时（老数据）返回空数组。
    */
-  function poolCardsOf(pool, rarityId) {
+  function poolCardsAll(pool) {
     if (!pool) return []
-    var ids = pool.byRarity && pool.byRarity[rarityId]
-    if (!ids) return []
+    var by = pool.byRarity || {}
     var out = []
-    for (var i = 0; i < ids.length; i++) {
-      var c = cardById(ids[i])
-      if (c) out.push(c)
+    var seen = {}
+    for (var r in by) {
+      if (!Object.prototype.hasOwnProperty.call(by, r)) continue
+      var ids = by[r] || []
+      for (var i = 0; i < ids.length; i++) {
+        if (seen[ids[i]]) continue
+        seen[ids[i]] = 1
+        var c = cardById(ids[i])
+        if (c) out.push(c)
+      }
     }
     return out
   }
@@ -608,28 +615,6 @@
     state.poolId = id
     lsSet(LS.pool, id)
     render()
-  }
-
-  /**
-   * 卡池选择器。**抽卡页与卡池一览共用同一个** ——
-   * 两处各写一份的话，「能选」与「真的按它抽」迟早会对不上。
-   */
-  function poolPickerRow() {
-    var row = el('div', { class: 'pool-tabs' })
-    var pools = (state.data && state.data.pools) || []
-    var cur = currentPool() || {}
-    pools.forEach(function (p) {
-      var n = poolPlayableCount(p)
-      var b = el('button', {
-        class: 'tab' + (p.id === cur.id ? ' tab-on' : ''),
-        type: 'button',
-        'data-pool': p.id,
-        title: '可抽 ' + n + ' 张',
-      }, [p.name])
-      b.addEventListener('click', function () { selectPool(p.id) })
-      row.appendChild(b)
-    })
-    return row
   }
 
   /** 这个池子可抽多少张（服务端算好优先，老数据退回自己数） */
@@ -1871,120 +1856,6 @@
     }
   }
 
-  // -------------------------------------------------------------------------
-  // ⑥ 板块：卡池一览
-  // -------------------------------------------------------------------------
-
-  function viewPool() {
-    var g = G()
-    var view = state.els.view
-    var wrap = el('div', { class: 'sec' })
-    wrap.appendChild(sectionHead('卡池一览', '整个卡池按稀有度分组。带锁角标的是还没抽到的。'))
-
-    if (!state.data.pools.length) {
-      wrap.appendChild(emptyBox('没有任何卡池', ['到后台管理里新建一个卡池。']))
-      view.appendChild(wrap)
-      return
-    }
-
-    var poolPicker = poolPickerRow()
-    wrap.appendChild(poolPicker)
-
-    var pool = currentPool()
-    var summary = g ? g.poolSummary(state.data, pool.id) : null
-    var rates = g ? g.rateTable(state.data, pool.id) : []
-
-    // ---- 卡池头：封面卡 + 收哪些系列 + 一共多少张 --------------------------
-    // 两个池子共用一部分系列（异界访客、常驻），只靠名字看不出区别，
-    // 所以把「封面 + 系列清单 + 可抽张数」摆出来，一眼能对上作者的设定。
-    if (pool) {
-      var coverNode
-      if (pool.coverCardUrl) {
-        coverNode = el('img', {
-          class: 'pool-cover-img',
-          src: pool.coverCardUrl,
-          alt: (pool.coverCard ? pool.coverCard.name : '') + ' 封面',
-          loading: 'lazy',
-        })
-      } else {
-        // 封面卡没配 / 名册里找不到时要说出来，不能留一块空白
-        coverNode = el('div', { class: 'pool-cover-empty', text: pool.coverMissing ? '封面卡不在名册里' : '未设封面' })
-      }
-      wrap.appendChild(
-        el('div', { class: 'pool-hero' }, [
-          el('div', { class: 'pool-cover' }, [coverNode]),
-          el('div', { class: 'pool-hero-body' }, [
-            el('div', { class: 'pool-hero-name' }, [pool.name]),
-            pool.desc ? el('div', { class: 'pool-hero-desc', text: pool.desc }) : null,
-            el('div', { class: 'pool-hero-line' }, [
-              el('span', { class: 'pool-hero-key', text: '封面' }),
-              el('span', { text: pool.coverCard ? pool.coverCard.name || pool.coverCard.id : '—' }),
-              pool.coverCard ? rarityChip(pool.coverCard.rarity) : null,
-            ]),
-            el('div', { class: 'pool-hero-line' }, [
-              el('span', { class: 'pool-hero-key', text: '系列' }),
-              el('span', { class: 'pool-hero-series', text: seriesLabel(pool.series) }),
-            ]),
-            el('div', { class: 'pool-hero-line' }, [
-              el('span', { class: 'pool-hero-key', text: '可抽' }),
-              el('span', { text: fmt(pool.playableCount == null ? (summary ? summary.total : 0) : pool.playableCount) + ' 张' }),
-            ]),
-          ]),
-        ])
-      )
-    }
-
-    if (summary && !summary.total) {
-      wrap.appendChild(
-        emptyBox('这个卡池里一张卡都没有', [
-          '卡牌名册是空的，或者所有卡都没有设置认识的稀有度。',
-          state.unlocked && !READONLY ? '到后台管理里点「扫描卡池」。' : '需要作者在后台把卡牌加进来。',
-        ])
-      )
-    }
-
-    var owned = collection()
-    summary &&
-      summary.rows.forEach(function (row) {
-        if (!row.count) return
-        var rate = null
-        for (var i = 0; i < rates.length; i++) if (rates[i].rarity.id === row.rarity.id) rate = rates[i]
-        // ⚠️ 必须只列**这个池子里**的卡，不能按稀有度从全名册里筛。
-        // 全名册筛的话「卡池一览」会把不属于这个池的卡也画出来 —— 两个池子一分家
-        // 就会看出来（同一个档位在两边显示一模一样的卡），而抽卡时却抽不到它们。
-        var cards = poolCardsOf(pool, row.rarity.id)
-        // 「出率 0.00%」和「抽不出」是两件事，不能混：
-        //   · 权重 0 或没配 -> 这一档在这轮抽卡里根本抽不到
-        //   · 真正在掷档里参与、只是概率低 -> 显示具体百分比
-        // 混在一起会让人以为「有卡就能抽到」。
-        var meta
-        if (!rate || !rate.playable) {
-          meta = row.count + ' 张 · 抽不出（权重 0 或这一档没配权重）'
-        } else {
-          meta = row.count + ' 张 · 出率 ' + fmtRate(rate.rate)
-        }
-        wrap.appendChild(
-          el('div', { class: 'group' + (rate && rate.playable ? '' : ' group-off') }, [
-            el('div', { class: 'group-head' }, [
-              rarityChip(row.rarity.id, { big: true }),
-              el('span', { class: 'group-meta', text: meta }),
-            ]),
-            el('div', { class: 'grid cards' }, cards.map(function (c) {
-              var cell = el('div', { class: 'pool-cell' })
-              cell.appendChild(cardFigure(c))
-              var n = Number(owned[c.id] || 0)
-              if (n > 0) cell.appendChild(el('div', { class: 'badge-owned', text: n > 1 ? '×' + n : '已获得' }))
-              else cell.appendChild(el('div', { class: 'badge-locked', text: '未获得' }))
-              return cell
-            })),
-          ])
-        )
-      })
-
-    view.appendChild(wrap)
-    // 切卡池的监听器已经绑在选择器内部（poolPickerRow），这里不用再委托一遍 ——
-    // 委托在测试用的 DOM shim 上根本不会触发（它不冒泡）。
-  }
 
   // -------------------------------------------------------------------------
   // ⑥ 板块：图鉴
@@ -2001,49 +1872,145 @@
    *
    * @returns {Array<{kind:'series'|'rarity'|'unknown', key, label, cards}>}
    */
+  /** 「不属于任何系列」在界面上的名字（数据里 series 为空串，`常驻` 是它的哨兵） */
+  var PLAIN_SERIES_LABEL = '常驻'
+
+  /**
+   * 图鉴的两级分组：**卡池（一级） -> 系列（二级）**。
+   *
+   * 用户要求：
+   *   · 一级 = 卡池，封面用**卡池封面**
+   *   · 二级 = 系列，封面用**该系列里最高稀有度的第一张卡**
+   *   · 系列「常驻」（也就是不属于任何系列的卡）**单独成一个一级目录，不并入卡池**
+   *   · 点封面 = 原来的展开/收起
+   *
+   * 「卡池一览」页面因此删掉了 —— 它展示的就是这里第一层的内容，功能重复。
+   *
+   * 返回的结构：
+   *   { kind:'pool', key, label, coverUrl, coverCard, cover, cards, children:[seriesGroup...] }
+   *   seriesGroup = { kind:'series', key, label, cover, cards }
+   *
+   * ⚠️ `key` 必须带上卡池 id：同一个系列（例如「异界访客」）可能同时属于两个池子，
+   * 只用系列名当键的话，收起一个会把另一个也收起来。
+   */
   function collectionGroups(cards) {
-    var groups = []
-    var seriesMap = {}
-    var seriesOrder = []
-
-    cards.forEach(function (c) {
-      if (!c.series) return
-      if (!seriesMap[c.series]) {
-        seriesMap[c.series] = []
-        seriesOrder.push(c.series)
-      }
-      seriesMap[c.series].push(c)
-    })
-
-    var rarityRank = {}
+    var ranks = {}
     rarityList().forEach(function (r) {
-      rarityRank[r.id] = Number(r.rank || 0)
+      ranks[r.id] = Number(r.rank || 0)
     })
-
-    seriesOrder.forEach(function (name) {
-      var list = seriesMap[name].slice().sort(function (a, b) {
+    var rankOf = function (c) {
+      return ranks[c.rarity] === undefined ? -1 : ranks[c.rarity]
+    }
+    var sortSeries = function (list) {
+      return list.slice().sort(function (a, b) {
         var ao = Number(a.seriesOrder || 0)
         var bo = Number(b.seriesOrder || 0)
         if (ao !== bo) return ao - bo
-        var ar = rarityRank[a.rarity] === undefined ? 999 : rarityRank[a.rarity]
-        var br = rarityRank[b.rarity] === undefined ? 999 : rarityRank[b.rarity]
-        if (ar !== br) return ar - br
+        if (rankOf(a) !== rankOf(b)) return rankOf(a) - rankOf(b)
         return String(a.name).localeCompare(String(b.name))
       })
-      groups.push({ kind: 'series', key: 'series:' + name, label: name, cards: list })
-    })
+    }
+    /** 组封面 = 组里最高稀有度的第一张（按组内顺序取第一张） */
+    var coverOf = function (sorted) {
+      var best = null
+      for (var i = 0; i < sorted.length; i++) {
+        if (!best || rankOf(sorted[i]) > rankOf(best)) best = sorted[i]
+      }
+      return best
+    }
+    var seriesGroup = function (label, key, list) {
+      var sorted = sortSeries(list)
+      return { kind: 'series', key: key, label: label, cards: sorted, cover: coverOf(sorted) }
+    }
 
-    rarityList().forEach(function (r) {
-      var list = cards.filter(function (c) {
-        return !c.series && c.rarity === r.id
+    var pools = (state.data.pools || []).slice()
+    var inAnyPool = {}
+
+    var groups = []
+    pools.forEach(function (pool) {
+      var ids = {}
+      // 成员判定走**同一个** poolCardsAll（只用服务端算好的 byRarity），
+      // 前端不另写一套筛选规则
+      poolCardsAll(pool).forEach(function (c) {
+        ids[c.id] = 1
+        inAnyPool[c.id] = 1
       })
-      if (list.length) groups.push({ kind: 'rarity', key: 'rarity:' + r.id, label: r.id, cards: list })
+      var mine = cards.filter(function (c) {
+        return ids[c.id]
+      })
+      // 「常驻」（不属于任何系列）不在卡池分组里出现 —— 它有自己的一个一级目录
+      var named = mine.filter(function (c) {
+        return !!c.series
+      })
+      var order = []
+      var map = {}
+      named.forEach(function (c) {
+        if (!map[c.series]) {
+          map[c.series] = []
+          order.push(c.series)
+        }
+        map[c.series].push(c)
+      })
+      var children = order.map(function (name) {
+        return seriesGroup(name, 'series:' + pool.id + ':' + name, map[name])
+      })
+      if (!named.length && !children.length) return
+      groups.push({
+        kind: 'pool',
+        key: 'pool:' + pool.id,
+        label: pool.name,
+        desc: pool.desc || '',
+        coverUrl: pool.coverCardUrl || '',
+        coverCard: pool.coverCard || null,
+        cover: coverOf(sortSeries(named)),
+        cards: named,
+        children: children,
+      })
     })
 
-    var unknown = cards.filter(function (c) {
-      return !c.rarityKnown
+    // 系列「常驻」：不属于任何系列的卡，单独一个一级目录（**不并入卡池**）。
+    // 它按「平铺」渲染：一级头下面直接是卡，不再套一层同名的系列头。
+    var plain = sortSeries(
+      cards.filter(function (c) {
+        return !c.series
+      })
+    )
+    if (plain.length) {
+      groups.push({
+        kind: 'pool',
+        key: 'pool:__plain__',
+        label: PLAIN_SERIES_LABEL,
+        desc: '不属于任何系列的卡',
+        coverUrl: '',
+        coverCard: null,
+        cover: coverOf(plain),
+        cards: plain,
+        children: [],
+        flat: true,
+      })
+    }
+
+    // 兜底：哪个池子都不收的卡也必须看得见 —— 否则它们会在图鉴里**静默消失**。
+    // 只在数据配错时才会出现（新系列忘了挂到池子上）。
+    var leftovers = cards.filter(function (c) {
+      return !inAnyPool[c.id]
     })
-    if (unknown.length) groups.push({ kind: 'unknown', key: 'unknown', label: '稀有度未设置', cards: unknown })
+    if (leftovers.length) {
+      var warnList = sortSeries(leftovers)
+      groups.push({
+        kind: 'pool',
+        key: 'pool:__orphan__',
+        label: '没挂到卡池的卡',
+        desc: '这些卡的系列不在任何卡池的清单里，所以哪个池子都抽不到',
+        coverUrl: '',
+        coverCard: null,
+        cover: coverOf(warnList),
+        cards: warnList,
+        children: [],
+        flat: true,
+        warn: true,
+      })
+    }
 
     return groups
   }
@@ -2149,82 +2116,157 @@
     var listBox = el('div', { class: 'coll-list' })
     wrap.appendChild(listBox)
 
+    /**
+     * 一级/二级组的封面。
+     *
+     * 卡池组用**卡池封面**（服务端算好的 `coverCardUrl`）；系列组用
+     * **该系列里最高稀有度的第一张卡**（`cover.imageUrl`）。两者都可能缺
+     *（没配封面 / 那张卡还没有图），那就画一个字母占位 ——
+     * 不能留一个空洞让人以为「图加载失败了」。
+     */
+    function coverNode(cover, coverUrl, alt, className) {
+      var src = coverUrl || (cover && cover.imageUrl) || ''
+      if (src) {
+        return el('span', { class: className }, [
+          el('img', { class: 'group-cover-img', src: src, alt: alt || '', loading: 'lazy' }),
+        ])
+      }
+      var ch = String(alt || '?').replace(/ 封面$/, '').slice(0, 1) || '?'
+      return el('span', { class: className + ' group-cover-empty', 'aria-hidden': 'true', text: ch })
+    }
+
+    /** 卡面网格 + 「点图看大图」。一级（平铺）与二级共用。 */
+    function groupBody(list) {
+      return el('div', { class: 'grid cards' }, list.map(function (c) {
+        var n = Number(owned[c.id] || 0)
+        var holder = el('div', { class: 'coll-cell' + (n > 0 ? '' : ' coll-locked') })
+        holder.appendChild(cardFigure(c))
+        if (n > 0) holder.appendChild(el('div', { class: 'badge-owned', text: n > 1 ? '×' + n : '已获得' }))
+        var open = el('button', {
+          class: 'coll-open',
+          type: 'button',
+          'data-card': c.id,
+          title: '看大图 / 合成：' + (c.name || c.id),
+          'aria-label': '查看大图：' + (c.name || c.id),
+        }, [el('span', { class: 'coll-open-hint', text: '看大图' })])
+        open.addEventListener('click', function () { openCardDialog(c.id) })
+        holder.appendChild(open)
+        return holder
+      }))
+    }
+
     function paint() {
       clear(listBox)
       var q = String(state.collQuery || '').trim().toLowerCase()
       var groups = collectionGroups(allCards)
       var shownGroups = 0
+      var shownSeries = 0
       var shownCards = 0
 
+      /** 可收起的标题（点它、点封面都是同一个动作）。 */
+      function toggleHead(opts) {
+        var head = el('button', {
+          class: 'group-head group-toggle ' + opts.className,
+          type: 'button',
+          'aria-expanded': opts.collapsed ? 'false' : 'true',
+          'data-coll-key': opts.key,
+          title: opts.title || '',
+        }, [
+          el('span', { class: 'group-caret', 'aria-hidden': 'true', text: opts.collapsed ? '▸' : '▾' }),
+          coverNode(opts.cover, opts.coverUrl, opts.coverAlt, opts.coverClass),
+          el('span', { class: 'group-text' }, [
+            el('span', { class: opts.nameClass, text: opts.label }),
+            el('span', { class: 'group-meta', text: opts.meta }),
+            opts.note ? el('span', { class: 'group-note', text: opts.note }) : null,
+          ]),
+        ])
+        // 事件直接绑在按钮上，不用委托：委托要靠冒泡 + closest()，
+        // 而测试用的 DOM shim 两样都没有 —— 那样写出来的代码在测试里
+        // 「点了没反应」，于是收起功能根本测不到。
+        head.addEventListener('click', function () {
+          var m = collapsedMap()
+          setCollapsed(opts.key, !m[opts.key])
+          paint()
+          // paint() 重建了整个列表，刚才那个按钮已经不在文档里了 ——
+          // 不把焦点还给新节点，键盘用户点一下就掉焦点。
+          var again = listBox.querySelector('[data-coll-key="' + opts.key + '"]')
+          if (again && typeof again.focus === 'function') again.focus()
+        })
+        return head
+      }
+
       groups.forEach(function (g) {
-        var list = g.cards.filter(function (c) { return cardMatches(c, q) })
-        if (!list.length) return
-        shownGroups++
-        shownCards += list.length
-
-        var gotHere = list.filter(function (c) { return Number(owned[c.id] || 0) > 0 }).length
-        // 搜索时强制展开：搜到了却还收着，看起来就像「搜不到」。
-        // 系列组才可收起 —— 需求要的是「同系列的卡可以收起」，稀有度组本来就是平的。
-        var collapsible = g.kind === 'series'
-        var collapsed = collapsible && !q && !!collapsedMap()[g.key]
-
-        var head
-        if (g.kind === 'series') {
-          head = el('button', {
-            class: 'group-head group-toggle',
-            type: 'button',
-            'aria-expanded': collapsed ? 'false' : 'true',
-            'data-coll-key': g.key,
-          }, [
-            el('span', { class: 'group-caret', 'aria-hidden': 'true', text: collapsed ? '▸' : '▾' }),
-            el('span', { class: 'series-chip', text: g.label }),
-            el('span', { class: 'group-meta', text: gotHere + ' / ' + list.length }),
-            el('span', { class: 'group-note', text: collapsed ? '已收起 · 系列' : '系列' }),
-          ])
-          // 直接绑在这个按钮上，不用事件委托：委托要靠事件冒泡 + closest()，
-          // 而测试用的 DOM shim 两样都没有 —— 那样写出来的代码在测试里
-          // 「点了没反应」，于是测试根本测不到收起功能。
-          head.addEventListener('click', function () {
-            var m = collapsedMap()
-            setCollapsed(g.key, !m[g.key])
-            paint()
-            // paint() 重建了整个列表，刚才那个按钮已经不在文档里了 ——
-            // 不把焦点还给新节点，键盘用户点一下就掉焦点。
-            var again = listBox.querySelector('[data-coll-key="' + g.key + '"]')
-            if (again && typeof again.focus === 'function') again.focus()
+        // 先按搜索词过滤：一级组里只剩匹配的卡/子组
+        var children = (g.children || [])
+          .map(function (sg) {
+            return { sg: sg, list: sg.cards.filter(function (c) { return cardMatches(c, q) }) }
           })
-        } else if (g.kind === 'unknown') {
-          head = el('div', { class: 'group-head' }, [
-            el('span', { class: 'chip chip-big chip-warn', text: g.label }),
-            el('span', { class: 'group-meta', text: list.length + ' 张' }),
-          ])
-        } else {
-          head = el('div', { class: 'group-head' }, [
-            rarityChip(g.label, { big: true }),
-            el('span', { class: 'group-meta', text: gotHere + ' / ' + list.length }),
-          ])
+          .filter(function (x) { return x.list.length })
+        var gCards = g.flat
+          ? g.cards.filter(function (c) { return cardMatches(c, q) })
+          : children.reduce(function (acc, x) { return acc.concat(x.list) }, [])
+        if (!gCards.length) return
+
+        shownGroups++
+        shownSeries += g.flat ? 0 : children.length
+        shownCards += gCards.length
+
+        var gotHere = gCards.filter(function (c) { return Number(owned[c.id] || 0) > 0 }).length
+        // 搜索时强制展开：搜到了却还收着，看起来就像「搜不到」
+        var poolCollapsed = !q && !!collapsedMap()[g.key]
+
+        var poolHead = toggleHead({
+          key: g.key,
+          label: g.label,
+          className: 'pool-head' + (g.warn ? ' group-warn' : ''),
+          collapsed: poolCollapsed,
+          cover: g.cover,
+          coverUrl: g.coverUrl,
+          coverAlt: g.label + ' 封面',
+          coverClass: 'group-cover pool-cover',
+          nameClass: 'pool-name',
+          meta:
+            gotHere + ' / ' + gCards.length + ' 张' +
+            (g.flat || !children.length ? '' : ' · ' + children.length + ' 个系列'),
+          note: g.desc || '',
+          title: g.desc || '',
+        })
+
+        if (g.flat) {
+          listBox.appendChild(
+            el('div', { class: 'group group-pool' + (poolCollapsed ? ' is-collapsed' : '') + (g.warn ? ' group-warn' : '') }, [
+              poolHead,
+              groupBody(gCards),
+            ])
+          )
+          return
         }
 
+        var seriesBoxes = children.map(function (x) {
+          var sg = x.sg
+          var list = x.list
+          var sgGot = list.filter(function (c) { return Number(owned[c.id] || 0) > 0 }).length
+          var sgCollapsed = !q && !!collapsedMap()[sg.key]
+          return el('div', { class: 'group group-series' + (sgCollapsed ? ' is-collapsed' : '') }, [
+            toggleHead({
+              key: sg.key,
+              label: sg.label,
+              className: 'series-head',
+              collapsed: sgCollapsed,
+              cover: sg.cover,
+              coverAlt: sg.label + ' 封面',
+              coverClass: 'group-cover series-cover',
+              nameClass: 'series-chip',
+              meta: sgGot + ' / ' + list.length,
+            }),
+            groupBody(list),
+          ])
+        })
+
         listBox.appendChild(
-          el('div', { class: 'group' + (g.kind === 'unknown' ? ' group-warn' : '') + (collapsed ? ' is-collapsed' : '') }, [
-            head,
-            el('div', { class: 'grid cards' }, list.map(function (c) {
-              var n = Number(owned[c.id] || 0)
-              var holder = el('div', { class: 'coll-cell' + (n > 0 ? '' : ' coll-locked') })
-              holder.appendChild(cardFigure(c))
-              if (n > 0) holder.appendChild(el('div', { class: 'badge-owned', text: n > 1 ? '×' + n : '已获得' }))
-              // 「点图看大图」：整张卡都可点，命中区域大才不会点空
-              var open = el('button', {
-                class: 'coll-open',
-                type: 'button',
-                'data-card': c.id,
-                title: '看大图 / 合成：' + (c.name || c.id),
-                'aria-label': '查看大图：' + (c.name || c.id),
-              }, [el('span', { class: 'coll-open-hint', text: '看大图' })])
-              open.addEventListener('click', function () { openCardDialog(c.id) })
-              holder.appendChild(open)
-              return holder
-            })),
+          el('div', { class: 'group group-pool' + (poolCollapsed ? ' is-collapsed' : '') }, [
+            poolHead,
+            el('div', { class: 'group-body' }, seriesBoxes),
           ])
         )
       })
@@ -2238,7 +2280,7 @@
         )
       }
       foundNote.textContent = q
-        ? '找到 ' + shownCards + ' 张' + (shownGroups ? '（' + shownGroups + ' 组）' : '')
+        ? '找到 ' + shownCards + ' 张' + (shownSeries ? '（' + shownSeries + ' 个系列）' : '')
         : '共 ' + allCards.length + ' 张 · ' + seriesNames.length + ' 个系列'
     }
 
@@ -2261,13 +2303,17 @@
     // 委托要靠冒泡与 closest()，测试用的 shim 没有）。这里只剩两个全局按钮。
 
     // 全部展开 / 全部收起
+    // 两级都要收：只收二级的话，一级还开着，看起来像「收了但没收干净」。
     wrap.querySelectorAll('[data-coll]').forEach(function (b) {
       b.addEventListener('click', function () {
         var mode = b.getAttribute('data-coll')
         var m = {}
         if (mode === 'collapse') {
           collectionGroups(allCards).forEach(function (g) {
-            if (g.kind === 'series') m[g.key] = true
+            m[g.key] = true
+            ;(g.children || []).forEach(function (sg) {
+              m[sg.key] = true
+            })
           })
         }
         state.collapsed = m
@@ -3753,7 +3799,6 @@
     // 白屏最难查 —— 没有任何线索；把错误本身画出来，至少能立刻定位。
     try {
       if (state.route === 'draw') viewDraw()
-      else if (state.route === 'pool') viewPool()
       else if (state.route === 'collection') viewCollection()
       else if (state.route === 'shards') viewShards()
       else if (state.route === 'history') viewHistory()
