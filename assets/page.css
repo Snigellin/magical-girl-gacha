@@ -556,17 +556,9 @@ body {
   opacity: 0.5;
 }
 
-.draw-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  flex-wrap: wrap;
-  padding: 0.9rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
+/* （这里原本还有一条 .draw-actions 的「面板」样式：抽卡键还单独占一块卡片时用的。
+   按钮挪到主视觉下面之后它已经没人用了，留着只会把面板背景 / 边框 / 内边距
+   悄悄加到新的一行上 —— 两条同名规则叠在一起，改样式时很难看出是哪条生效。） */
 
 .draw-have {
   color: var(--muted);
@@ -1700,14 +1692,28 @@ textarea {
   line-height: 1.6;
 }
 
-/* 抽卡键：主视觉右下角，21:9 */
+/* 主视觉那一列：轮播 + 它**下面**的抽卡键行 */
+.draw-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+/* 列里按自己的 16:9 定高，不要被拉伸 */
+.draw-main > .draw-banner {
+  flex: 0 0 auto;
+}
+
+/* 抽卡键：主视觉**外面**的一行，右对齐；21:9 的比例保持不变。
+   （以前是 absolute 压在主视觉右下角 —— 会挡到画面。） */
 .draw-actions {
-  position: absolute;
-  right: 0.8rem;
-  bottom: 0.8rem;
-  z-index: 4;
   display: flex;
   gap: 0.5rem;
+  justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .draw-btn {
@@ -1746,7 +1752,7 @@ textarea {
   cursor: not-allowed;
 }
 
-/* 现有券数压在主视觉左下角（与右下角的抽卡键相对） */
+/* 现有券数压在主视觉左下角（小小的胶囊，不是按钮 —— 按钮已经挪到主视觉外面了） */
 .banner-have {
   position: absolute;
   left: 0.8rem;

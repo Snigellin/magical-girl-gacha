@@ -1709,37 +1709,36 @@
       )
     }
 
-    // 抽卡键：主视觉**右下角**，按 21:9 放大（比例写在 page.css 的 .draw-btn）
+    // 抽卡键：**放在主视觉外面**的一行（用户要求：不要压在封面卡片上）。
+    // 主视觉保持 16:9 完整可见，按钮排在它下面、右对齐。
     var cost1 = state.data.settings.pull.costSingle
     var cost10 = g.costFor(state.data, 10)
     var have = Number(player().currency || 0)
     var disabled = probs.length > 0
 
-    banner.appendChild(
-      el('div', { class: 'draw-actions' }, [
-        el('button', {
-          class: 'btn draw-btn draw-btn-primary',
-          type: 'button',
-          'data-bind': 'draw1',
-          disabled: disabled || undefined,
-        }, [
-          el('span', { class: 'draw-btn-label', text: '单抽' }),
-          el('span', { class: 'draw-btn-cost', text: cost1 ? '×' + cost1 : '免费' }),
-        ]),
-        el('button', {
-          class: 'btn draw-btn',
-          type: 'button',
-          'data-bind': 'draw10',
-          disabled: disabled || undefined,
-        }, [
-          el('span', { class: 'draw-btn-label', text: '十连' }),
-          el('span', { class: 'draw-btn-cost', text: cost10 ? '×' + cost10 : '免费' }),
-        ]),
-      ])
-    )
-    // 现有券数压在主视觉左下角（与右下角的抽卡键相对）
+    var actions = el('div', { class: 'draw-actions' }, [
+      el('button', {
+        class: 'btn draw-btn draw-btn-primary',
+        type: 'button',
+        'data-bind': 'draw1',
+        disabled: disabled || undefined,
+      }, [
+        el('span', { class: 'draw-btn-label', text: '单抽' }),
+        el('span', { class: 'draw-btn-cost', text: cost1 ? '×' + cost1 : '免费' }),
+      ]),
+      el('button', {
+        class: 'btn draw-btn',
+        type: 'button',
+        'data-bind': 'draw10',
+        disabled: disabled || undefined,
+      }, [
+        el('span', { class: 'draw-btn-label', text: '十连' }),
+        el('span', { class: 'draw-btn-cost', text: cost10 ? '×' + cost10 : '免费' }),
+      ]),
+    ])
+    // 现有券数压在主视觉左下角（小胶囊，不是按钮）
     banner.appendChild(el('span', { class: 'banner-have', text: '现有 ' + have + ' ' + (player().currencyName || '抽卡券') }))
-    stage.appendChild(banner)
+    stage.appendChild(el('div', { class: 'draw-main' }, [banner, actions]))
     wrap.appendChild(stage)
 
     // 抽卡范围 + 出率表：信息仍然要能看到，但不再占主视觉的位置
