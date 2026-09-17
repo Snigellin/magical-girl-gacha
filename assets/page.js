@@ -2753,6 +2753,61 @@
       ])
     )
 
+    // --- 表情包与抽卡动画 -------------------------------------------------
+    //
+    // 这两块以前只能改 data.json 或跑命令行（`import-art.mjs --emoji-dir`）——
+    // 属于「功能在、但读者够不着」。它们的形状都是「一组按档位来的值 + 几个全局数值」，
+    // 所以放一块儿。
+    //
+    // ⚠️ 表情包目录是**受控白名单**：只有列在这里的目录里的图才会被转发。
+    // 与 `图片目录` 分开是本项目的既有约束 —— 合在一起的话「扫描卡池」会把表情包
+    // 当成卡牌扫进名册（见 lib/data.js 的 scanningImageRoots）。
+    var emojiDirs = Array.isArray(s.emojiDirs) ? s.emojiDirs : []
+    var poolUiDirs = Array.isArray(s.poolUiDirs) ? s.poolUiDirs : []
+    var emojiMap = s.emoji || {}
+    var rv = s.reveal || {}
+    var rvColors = rv.colors || {}
+    var emojiRarities = Array.isArray(rv.emojiRarities) ? rv.emojiRarities : []
+    var rarityOpts = rarityList()
+    wrap.appendChild(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'panel-title', text: '③-3 表情包与抽卡动画' }),
+        el('p', { class: 'panel-hint', text: '表情包目录是受控白名单：只有列在这里的目录里的图才会被转发（与「图片目录」分开，否则扫描卡池会把表情包当成卡牌）。' }),
+        field('表情包目录（一行一个，受控白名单）', textarea(emojiDirs.join('\n'), 3, 'emoji-dirs')),
+        // 卡池 UI（横幅）目录：和表情包一样必须与「图片目录」分开 ——
+        // 合在一起的话「扫描卡池」会把横幅当成卡牌扫进名册。
+        field('卡池 UI 目录（主视觉/横幅，一行一个，受控白名单）', textarea(poolUiDirs.join('\n'), 3, 'pool-ui-dirs')),
+        el('div', { class: 'panel-sub' }, rarityOpts.map(function (r) {
+          return field(
+            '表情包 · ' + (r.label || r.id) + '（文件名，留空 = 这一档不弹）',
+            input('text', emojiMap[r.id] || '', 'emoji-file-' + r.id, r.id)
+          )
+        })),
+        field('抽卡动画（关掉就点一下直接出结果）', select(['true', 'false'], String(rv.enabled !== false), 'reveal-enabled')),
+        el('div', { class: 'panel-sub' }, [
+          field('背景暗度 · 起始（0~1）', input('number', rv.backdropBase, 'reveal-backdrop-base')),
+          field('背景暗度 · 每张递增（0~1）', input('number', rv.backdropStep, 'reveal-backdrop-step')),
+          field('拖动时放大（0~1）', input('number', rv.dragScale, 'reveal-drag-scale')),
+          field('最高档拖动时放大（0~1）', input('number', rv.dragScaleTop, 'reveal-drag-scale-top')),
+        ]),
+        el('div', { class: 'panel-sub' }, rarityOpts.map(function (r) {
+          return field('纯色卡颜色 · ' + (r.label || r.id) + '（#rrggbb）', input('text', rvColors[r.id] || '', 'reveal-color-' + r.id, r.id))
+        })),
+        el('div', { class: 'field' }, [
+          el('span', { class: 'field-label', text: '哪些档位弹表情包' }),
+          el('div', { class: 'checks' }, rarityOpts.map(function (r) {
+            var box = el('input', { type: 'checkbox', 'data-bind': 'reveal-emoji-' + r.id, 'data-key': r.id })
+            box.checked = emojiRarities.indexOf(r.id) >= 0
+            return el('label', { class: 'check' }, [box, el('span', { text: r.label || r.id })])
+          })),
+        ]),
+        el('div', { class: 'panel-actions' }, [
+          el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-reveal' }, ['保存表情包与动画']),
+        ]),
+        el('p', { class: 'panel-hint', text: '表情包文件名写相对路径或受控目录内的绝对路径都行；转发 URL 由服务端算好下发。' }),
+      ])
+    )
+
     // --- 卡池 -------------------------------------------------------------
     state.data.pools.forEach(function (p) {
       var weightRows = rarityList().map(function (r) {
@@ -3097,6 +3152,76 @@
           },
         })
           .then(function (res) { afterWrite(res, '碎片规则已保存') })
+          .catch(fail)
+      })
+    }
+
+    var saveReveal = q('save-reveal')
+    if (saveReveal) {
+      saveReveal.addEventListener('click', function () {
+        var rar = rarityList()
+        // 颜色先验一次。写错一个（`red`、漏了 `#`、六个十六进制里混进一个 g）
+        // 会让那一档的纯色卡变成透明或黑块 —— 页面上不会有任何报错，
+        // 属于「改了没生效」里最难查的一类。
+        var colors = {}
+        for (var i = 0; i < rar.length; i++) {
+          var cNode = q('reveal-color-' + rar[i].id)
+          var cv = cNode ? String(cNode.value).trim() : ''
+          if (cv && !/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(cv)) {
+            window.alert('颜色要写成 #rrggbb 或 #rgb（现在是「' + cv + '」，档位 ' + (rar[i].label || rar[i].id) + '）')
+            return
+          }
+          if (cv) colors[rar[i].id] = cv
+        }
+        function numOr(bind, fallback) {
+          var node = q(bind)
+          var raw = node ? String(node.value).trim() : ''
+          if (raw === '') return fallback
+          var n = Number(raw)
+          return Number.isFinite(n) ? n : fallback
+        }
+        // 目录那一栏是「一行一个」，空行与首尾空格都清掉 —— 留着空串会让
+        // 受控目录里多出一个 `''`，解析图片时表现成「莫名其妙找不到图」。
+        var emojiDirsNext = q('emoji-dirs')
+          ? q('emoji-dirs')
+              .value.split('\n')
+              .map(function (x) { return x.trim() })
+              .filter(Boolean)
+          : []
+        var poolUiDirsNext = q('pool-ui-dirs')
+          ? q('pool-ui-dirs')
+              .value.split('\n')
+              .map(function (x) { return x.trim() })
+              .filter(Boolean)
+          : []
+        var emoji = {}
+        var emojiRaritiesNext = []
+        for (var j = 0; j < rar.length; j++) {
+          var fNode = q('emoji-file-' + rar[j].id)
+          var file = fNode ? String(fNode.value).trim() : ''
+          if (file) emoji[rar[j].id] = file
+          var box = q('reveal-emoji-' + rar[j].id)
+          if (box && box.checked) emojiRaritiesNext.push(rar[j].id)
+        }
+        var enabledSel = q('reveal-enabled')
+        request('/settings.json', {
+          method: 'POST',
+          body: {
+            emojiDirs: emojiDirsNext,
+            poolUiDirs: poolUiDirsNext,
+            emoji: emoji,
+            reveal: {
+              enabled: enabledSel ? enabledSel.value !== 'false' : true,
+              colors: colors,
+              backdropBase: numOr('reveal-backdrop-base', 0.42),
+              backdropStep: numOr('reveal-backdrop-step', 0.13),
+              dragScale: numOr('reveal-drag-scale', 0.1),
+              dragScaleTop: numOr('reveal-drag-scale-top', 0.18),
+              emojiRarities: emojiRaritiesNext,
+            },
+          },
+        })
+          .then(function (res) { afterWrite(res, '表情包与动画已保存') })
           .catch(fail)
       })
     }

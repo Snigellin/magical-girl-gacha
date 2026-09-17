@@ -864,6 +864,33 @@ body {
   gap: 0.25rem;
 }
 
+/* 后台里一组同类的字段：两列起排，窄屏自动落回一列 */
+.panel-sub {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.6rem;
+}
+
+/* 一组复选框（例如「哪些档位弹表情包」） */
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.check input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+
 .field-label {
   font-size: 0.78rem;
   font-weight: 600;
