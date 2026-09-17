@@ -164,6 +164,140 @@
   }
 
   // -------------------------------------------------------------------------
+  // SP 保底（用户要求）
+  // -------------------------------------------------------------------------
+  //
+  // 规则原话：「在抽到了已有的 SP 卡牌之后，如果还未拥有当前卡池内的所有 SP 卡牌，
+  // 则暂时将已拥有的 SP 卡牌移出当前卡池，直到下一次 SP 卡牌抽取出来才移回来」。
+  //
+  // 拆成三件独立的事，都在这里实现（服务端 / 静态导出 / 前端共用同一份）：
+  //   · `topRarityId`  —— 哪一档算「SP」。用**最高档**（rank 最大），
+  //     与 pityMax 的「最高档」是同一个定义，以后加更高的档位也跟着走
+  //   · `spExclusions` —— 现在该把哪些卡从这一档里移出去
+  //   · `spPityAfter`  —— 抽完之后开关变成什么（纯函数）
+  //
+  // ⚠️ 「移出」只影响**抽卡**：图鉴、卡池一览、碎片、卡面一律照旧。
+
+  /** 最高档的 id（rank 最大的那一档）。表为空时返回空串。 */
+  function topRarityId(data) {
+    var list = (data && data.rarities) || []
+    var best = ''
+    var bestRank = -Infinity
+    for (var i = 0; i < list.length; i++) {
+      var rk = Number(list[i].rank || 0)
+      if (rk >= bestRank) {
+        bestRank = rk
+        best = list[i].id
+      }
+    }
+    return best
+  }
+
+  /** 已拥有的卡 id 集合（`owned` 是 id -> 张数，>=1 才算拥有） */
+  function ownedIds(player) {
+    var out = Object.create(null)
+    var owned = (player && player.owned) || {}
+    for (var k in owned) {
+      if (owned[k] >= 1) out[k] = 1
+    }
+    return out
+  }
+
+  /** 这个池子的 SP 保底开关现在开着吗（状态存在 `player.spPity[poolId]`） */
+  function spPityActive(data, poolId) {
+    var m = data && data.player && data.player.spPity
+    if (!m || typeof m !== 'object') return false
+    return !!m[poolId]
+  }
+
+  /** 本池最高档的全部卡 id */
+  function topBucket(data, pool) {
+    var spId = topRarityId(data)
+    if (!spId) return []
+    return indexes(data, pool).byRarity[spId] || []
+  }
+
+  /**
+   * 现在该把哪些卡从这一档里移出去。
+   *
+   * 三个前置条件缺一不可，且**每一条都必须是硬约束**：
+   *   ① 开关开着（没开就什么都不做）
+   *   ② 这一档就是最高档（只对 SP 生效，别的档位不动）
+   *   ③ 移出去之后这一档**还有卡**。全被移走的话 SP 就再也抽不出来了，
+   *      那比抽到重复更糟 —— 集齐之后（或靠碎片合成补齐之后）必须能正常抽。
+   *
+   * @param {object} [state] 本轮的工作状态 `{ active, owned }`。
+   *   **不能只看 data.player.owned**：同一轮十连里刚抽到的那张 SP 也已经是
+   *   「已有」了，只看持久化的那份会把它当成可抽的，于是同一轮里又抽出同一张
+   *   ——正是用户要避免的事（实测过：这样写审计会报出 120 次「抽到已有的 SP」）。
+   *   不传就退回持久化状态（单抽路径就是这种情况）。
+   * @returns {Array<string>} 要排除的 id；空数组表示不排除
+   */
+  function spExclusions(data, pool, bucket, rarityId, state) {
+    state = state || {}
+    var active = state.active === undefined ? spPityActive(data, pool && pool.id) : !!state.active
+    if (!active) return []
+    if (rarityId !== topRarityId(data)) return []
+    var owned = ownedIds(data && data.player)
+    if (state.owned) {
+      for (var k in state.owned) {
+        if (state.owned[k]) owned[k] = 1
+      }
+    }
+    var out = []
+    for (var i = 0; i < bucket.length; i++) {
+      if (owned[bucket[i]]) out.push(bucket[i])
+    }
+    if (out.length >= bucket.length) return []
+    return out
+  }
+
+  /**
+   * 抽完之后 SP 保底的工作状态（**纯函数**，不改任何东西）。
+   *
+   * 逐张按顺序判定，所以同一轮十连里也会立刻生效：
+   *   · 开关开着 + 抽出 SP  -> 关掉（「移回来」）
+   *   · 开关关着 + 抽出**已有**的 SP + 还没集齐本池 SP -> 打开
+   *
+   * 「已有」按**当时的**收集状态判断：同一轮里第二张同样的 SP 也算「已有」。
+   * 集齐之后就不再打开 —— 那时候重复是必然的，移出去只会让这一档没有卡可抽。
+   *
+   * @returns {{active:boolean, changed:boolean, owned:object}}
+   *   `owned` 是**含本轮已抽到**的拥有集合，下一抽要把它一起传回 spExclusions。
+   */
+  function spPityAfter(data, pool, results) {
+    var spId = topRarityId(data)
+    var all = spId ? topBucket(data, pool) : []
+    var owned = ownedIds(data && data.player)
+    var active = spPityActive(data, pool && pool.id)
+    var changed = false
+    for (var i = 0; i < results.length; i++) {
+      var one = results[i]
+      if (!one || !one.card || one.rarityId !== spId) continue
+      var wasOwned = !!owned[one.card.id]
+      owned[one.card.id] = 1
+      if (active) {
+        active = false
+        changed = true
+        continue
+      }
+      if (!wasOwned) continue
+      var allOwned = true
+      for (var k = 0; k < all.length; k++) {
+        if (!owned[all[k]]) {
+          allOwned = false
+          break
+        }
+      }
+      if (!allOwned) {
+        active = true
+        changed = true
+      }
+    }
+    return { active: active, changed: changed, owned: owned }
+  }
+
+  // -------------------------------------------------------------------------
   // 核心
   // -------------------------------------------------------------------------
 
@@ -272,34 +406,6 @@
         }
       }
     }
-    // 十连保底的兜底：drawMany 会指定一个最低档位，这里必须真的用它，
-    // 否则「保底」传进来却被忽略 —— 那就是一次静默失效。
-    if (opts._forceRarity) {
-      var want = String(opts._forceRarity)
-      if (candidates.indexOf(want) >= 0) forced = want
-      else if (!forced) {
-        // 指定的保底档位在这个池子里抽不出来（没卡或权重为 0）：
-        // 退到「不高于它的、可抽的最高档」，并在结果里标出来，不假装保底成功。
-        var wantRank = -1
-        for (var t = 0; t < data.rarities.length; t++) {
-          if (data.rarities[t].id === want) wantRank = Number(data.rarities[t].rank || 0)
-        }
-        var bestFallback = ''
-        var bestRank = -1
-        for (var u = 0; u < candidates.length; u++) {
-          for (var v = 0; v < data.rarities.length; v++) {
-            if (data.rarities[v].id === candidates[u]) {
-              var rk2 = Number(data.rarities[v].rank || 0)
-              if (rk2 <= wantRank && rk2 > bestRank) {
-                bestRank = rk2
-                bestFallback = candidates[u]
-              }
-            }
-          }
-        }
-        if (bestFallback) forced = bestFallback
-      }
-    }
 
     var rarityId = forced || weightedPick(candidates, function (rid) {
       return Number(weights[rid] || 0)
@@ -310,6 +416,17 @@
       // 走到这里说明上面的一致性检查漏了 —— 明确报出来，别返回 undefined
       return { ok: false, error: '档位 ' + rarityId + ' 下没有卡（卡池数据不一致）' }
     }
+
+    // SP 保底：把已拥有的 SP 临时移出这一档（只对最高档、只在开关开着时）
+    var excluded = spExclusions(data, pool, bucket2, rarityId, opts._sp)
+    if (excluded.length) {
+      var kept = []
+      for (var e = 0; e < bucket2.length; e++) {
+        if (excluded.indexOf(bucket2[e]) < 0) kept.push(bucket2[e])
+      }
+      bucket2 = kept
+    }
+
     // 同档位内等概率。若之后要「同档内不同权重」，改这一行即可。
     var pickId = bucket2[Math.floor(rng() * bucket2.length) % bucket2.length]
     var card = idx.byId[pickId]
@@ -353,7 +470,12 @@
 
     var results = []
     for (var n = 0; n < count; n++) {
-      var one = drawSingle(data, poolId, { rng: rng })
+      // SP 保底：每一抽都按「到目前为止的结果」重算一次开关，所以同一轮十连里
+      // 抽到重复 SP 之后，后面的几抽就已经看不到那张卡了
+      //（用户原话：「暂时移出当前卡池，直到下一次 SP 抽出来才移回来」）。
+      // 用 `spPityAfter` 重放前缀而不是自己维护一个可变状态：这套规则只有一份实现。
+      var mid = spPityAfter(data, pool, results)
+      var one = drawSingle(data, poolId, { rng: rng, _sp: { active: mid.active, owned: mid.owned } })
       if (!one.ok) return one
       results.push(one)
     }
@@ -373,7 +495,13 @@
         }
       }
       if (best < guaranteeRank) {
-        var forced = drawSingle(data, poolId, { rng: rng, _forceRarity: guarantee })
+        // 保底替换也要带上本轮的工作状态 —— 否则它等于「忘了这一轮抽过什么」
+        var guaranteeSp = spPityAfter(data, pool, results)
+        var forced = drawSingle(data, poolId, {
+          rng: rng,
+          _forceRarity: guarantee,
+          _sp: { active: guaranteeSp.active, owned: guaranteeSp.owned },
+        })
         if (forced.ok) {
           // ⚠️ 只有真的出了保底档才算保底生效。若保底档在这个池子里抽不出来，
           // drawSingle 会退到较低的档并标 forced='tenpull-fallback' ——
@@ -388,7 +516,12 @@
       }
     }
 
-    return { ok: true, results: results, poolId: pool.id }
+    // SP 保底开关的最终结论。
+    // ⚠️ 必须在十连保底**换掉最后一张之后**再算：那张卡到底算不算「抽到过」，
+    // 结论会不一样。重放一遍是纯函数，比在循环里小心翼翼地回滚可靠得多。
+    var spAfter = spPityAfter(data, pool, results)
+
+    return { ok: true, results: results, poolId: pool.id, spPity: { active: spAfter.active, changed: spAfter.changed } }
   }
 
   // -------------------------------------------------------------------------
@@ -469,6 +602,11 @@
     rateTable: rateTable,
     mulberry32: mulberry32,
     cryptoRandom: cryptoRandom,
+    // SP 保底：给页面显示状态用，也给测试直接断言这套规则
+    topRarityId: topRarityId,
+    spPityActive: spPityActive,
+    spPityAfter: spPityAfter,
+    spExclusions: spExclusions,
   }
 
   root.Gacha = api

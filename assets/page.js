@@ -373,6 +373,8 @@
         // 与服务端同名：稀有度 id -> 个数
         shards: {},
         duplicates: 0,
+        // 与服务端同名：卡池 id -> true（SP 保底开关，见 draw.js 的 spPityAfter）
+        spPity: {},
       }
     }
     // 旧版本用过 collection 这个名字 —— 迁移过来，别让老玩家的收集进度凭空消失
@@ -384,6 +386,13 @@
     if (!s.shards || typeof s.shards !== 'object') s.shards = {}
     if (!Array.isArray(s.history)) s.history = []
     if (typeof s.duplicates !== 'number') s.duplicates = 0
+    // 只留真值：留着 false / 0 / 空字符串会让「开关开着吗」这类判断到处要写 === true
+    if (!s.spPity || typeof s.spPity !== 'object') s.spPity = {}
+    else {
+      var kept = {}
+      for (var pk in s.spPity) if (s.spPity[pk]) kept[pk] = true
+      s.spPity = kept
+    }
     return s
   }
 
@@ -475,15 +484,18 @@
     if (patch.pulls !== undefined) p.pulls = Number(patch.pulls || 0)
     if (patch.sinceTop !== undefined) p.sinceTop = Number(patch.sinceTop || 0)
     if (patch.history) p.history = patch.history
+    if (patch.spPity) p.spPity = patch.spPity
   }
 
   /**
-   * 把**当前实际状态**（owned / shards）折进快照，供 shards.js 的纯函数使用。
+   * 把**当前实际状态**（owned / shards / sinceTop / spPity）折进快照，
+   * 供 shards.js / draw.js 的纯函数使用。
    *
-   * ⚠️ 这一步也不能省。shards.js 的函数是纯函数，只认传入对象里的 `player.shards`；
-   * 而静态站的数据快照里**根本没有 player**（导出时会剥离），
-   * 直接传 state.data 会让碎片永远显示 0、兑换按钮永远禁用 —— 一个「点了没反应」
-   * 的静默 bug。所有 asking「能不能兑换」「现在有多少碎片」的地方都先过这里。
+   * ⚠️ 这一步也不能省。shards.js / draw.js 的函数是纯函数，只认传入对象里的
+   * `player.*`；而静态站的数据快照里**根本没有 player**（导出时会剥离），
+   * 直接传 state.data 会让碎片永远显示 0、兑换按钮永远禁用、
+   * 「抽到的是不是重复」「SP 保底开着没有」全判错 —— 一个「点了没反应」的静默 bug。
+   * 所有问「能不能兑换」「现在有多少碎片」「这次是不是重复」的地方都先过这里。
    */
   function dataWithState() {
     var d = state.data || {}
@@ -493,6 +505,8 @@
         owned: p.owned || p.collection || {},
         shards: p.shards || {},
         duplicates: Number(p.duplicates || 0),
+        sinceTop: Number(p.sinceTop || 0),
+        spPity: p.spPity || {},
       }),
     })
   }
@@ -1423,7 +1437,10 @@
       return
     }
 
-    var result = g.drawMany(data, { poolId: pool.id, count: count })
+    // ⚠️ 这里必须传 dataWithState() 而不是 state.data：SP 保底要看**已拥有**哪些卡，
+    // 而静态站的快照里没有 player（状态在 localStorage 里）——
+    // 传 state.data 会让保底永远算成「一张都没拥有」，开关永远打不开。
+    var result = g.drawMany(dataWithState(), { poolId: pool.id, count: count })
     if (!result.ok) {
       toast('抽卡失败：' + result.error, 'error')
       renderDrawProblem([result.error], pool)
@@ -1461,6 +1478,13 @@
     local.shards = settle.shards
     local.duplicates = Number(local.duplicates || 0) + settle.duplicates
 
+    // SP 保底开关：结论由 draw.js 的纯函数给出（与服务端同一份规则）。
+    // 在**本池**上开或关，别的池子不受影响。
+    var spAfter = result.spPity || { active: false, changed: false }
+    local.spPity = Object.assign({}, local.spPity || {})
+    if (spAfter.active) local.spPity[pool.id] = true
+    else delete local.spPity[pool.id]
+
     var at = Date.now()
     var rows = settle.perCard.map(function (pc, idx) {
       return {
@@ -1486,6 +1510,7 @@
       pulls: local.pulls,
       sinceTop: local.sinceTop,
       history: local.history,
+      spPity: local.spPity,
     })
 
     // --- 展示用的本轮结果 ------------------------------------------------
@@ -1582,6 +1607,8 @@
           poolId: pool.id,
           cost: cost,
           sinceTop: sinceTop,
+          // SP 保底开关按池子记，服务端没有别的来源 —— 整张表送上去
+          spPity: local.spPity,
           results: result.results.map(function (item) {
             return { cardId: item.card.id }
           }),
@@ -1652,6 +1679,17 @@
         el('span', { class: 'pill', text: '累计 ' + fmt(player().pulls) + ' 抽' }),
         state.sinceTop !== undefined && state.data.settings.pull.pityMax > 0
           ? el('span', { class: 'pill', text: '保底 ' + fmt(state.sinceTop) + '/' + state.data.settings.pull.pityMax })
+          : null,
+        // SP 保底生效时要说出来 —— 否则读者会觉得「这几张 SP 怎么突然抽不到了」。
+        // 这是**当前池子**的开关，切池子会跟着变。
+        // ⚠️ 必须走 dataWithState()：静态站的快照里没有 player（状态在 localStorage），
+        // 直接读 state.data 会让保底明明开着却不显示。
+        pool && g && g.spPityActive(dataWithState(), pool.id)
+          ? el('span', {
+              class: 'pill pill-pity',
+              text: 'SP 保底：下次出 SP 必是新卡',
+              title: '你已经抽到过重复的 SP，而本池的 SP 还没集齐 —— 已拥有的 SP 暂时不在抽取范围内，直到下次抽出 SP 为止',
+            })
           : null,
       ])
     )
@@ -2569,6 +2607,8 @@
     local.owned = {}
     local.shards = {}
     local.duplicates = 0
+    // SP 保底开关也是玩家状态的一部分：收集进度清了，保底自然也该回到初始
+    local.spPity = {}
     saveLocal(local)
     state.last = null
     state.sinceTop = 0
@@ -2580,6 +2620,7 @@
       pulls: local.pulls,
       sinceTop: local.sinceTop,
       history: local.history,
+      spPity: local.spPity,
     })
 
     function done() {
