@@ -352,6 +352,15 @@
       if (target.hidden) {
         return { ok: false, error: '「' + (target.name || cardId) + '」已隐藏，不能合成' }
       }
+      // 纪念卡**不能用碎片合成**（用户 2026-09-18 紧急要求）：
+      // 它们只在「清空缓存」重置存档时赠送。碎片若能换，就等于开了第二条获取途径，
+      // 而「只可通过此方式获取」正是这类卡的定义。
+      if (target.memorial) {
+        return {
+          ok: false,
+          error: '「' + (target.name || cardId) + '」是纪念卡 —— 纪念卡不能用碎片合成，只能在「清空缓存」（重置存档）时获赠',
+        }
+      }
       if (!target.rarityKnown) {
         return { ok: false, error: '「' + (target.name || cardId) + '」还没有设置稀有度，不能合成' }
       }
