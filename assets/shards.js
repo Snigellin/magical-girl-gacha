@@ -36,21 +36,25 @@
 ;(function (root) {
   'use strict'
 
-  /** 默认比例（与 lib/data.js 的 defaultShards 保持一致） */
-  var DEFAULTS = { perDuplicate: 1, costForCard: 5, costForUpgrade: 5 }
+  /**
+   * 默认比例（与 lib/data.js 的 defaultShards 保持一致）。
+   * 升档是 **3:1**（每 3 个碎片合成高一级的碎片），
+   * 但 UR -> SP 是例外 **9:1**（见 `upgradeCosts`）。
+   */
+  var DEFAULTS = { perDuplicate: 1, costForCard: 5, costForUpgrade: 3, upgradeCosts: { UR: 9 } }
 
   /**
-   * 碎片 -> 抽卡券 的默认比例（用户 2026-09-18 给的）：
-   *   SR 5:1 ／ SSR 1:1 ／ UR 1:5 ／ SP(???) 1:25
+   * 碎片 -> 抽卡券 的默认比例（用户 2026-09-18 最终版）：
+   *   SR 9:1 ／ SSR 3:1 ／ UR 1:1 ／ SP(???) 1:9
    * 键是**档位 id**（`???` 就是 SP），值是 `{ shards, tickets }`：
    * 花 `shards` 个碎片换 `tickets` 张券，必须**整批**换 ——
-   * 所以界面上是「换 1 批 / 换 N 批」，而不是按单个碎片算（SR 是 5:1，单个除不尽）。
+   * 所以界面上是「换 1 批 / 换 N 批」，而不是按单个碎片算（SR 是 9:1，单个除不尽）。
    */
   var TICKET_DEFAULTS = {
-    SR: { shards: 5, tickets: 1 },
-    SSR: { shards: 1, tickets: 1 },
-    UR: { shards: 1, tickets: 5 },
-    '???': { shards: 1, tickets: 25 },
+    SR: { shards: 9, tickets: 1 },
+    SSR: { shards: 3, tickets: 1 },
+    UR: { shards: 1, tickets: 1 },
+    '???': { shards: 1, tickets: 9 },
   }
 
   /**
@@ -95,9 +99,31 @@
       perDuplicate: posInt(sh.perDuplicate, DEFAULTS.perDuplicate),
       costForCard: posInt(sh.costForCard, DEFAULTS.costForCard),
       costForUpgrade: posInt(sh.costForUpgrade, DEFAULTS.costForUpgrade),
+      // 例外升级价：键是**来源档位** id（UR -> SP 是 9:1，其余 3:1）
+      upgradeCosts: (function () {
+        var raw = sh.upgradeCosts && typeof sh.upgradeCosts === 'object' ? sh.upgradeCosts : DEFAULTS.upgradeCosts
+        var out = {}
+        for (var k in raw) {
+          if (!Object.prototype.hasOwnProperty.call(raw, k)) continue
+          out[k] = posInt(raw[k], DEFAULTS.costForUpgrade)
+        }
+        return out
+      })(),
     }
   }
 
+  /**
+   * 某个**来源档位**升到高一级要几个碎片。
+   *
+   * 默认 3:1，但 UR -> SP 是例外 9:1（用户：「UR碎片和SP碎片的兑换比也改为9:1，
+   * 其余不变（即UR和SP之间为特殊档位）」）。界面上显示的价必须走这里，
+   * 否则会告诉读者「3 个就能升」，点下去却被拒。
+   */
+  function upgradeCostFor(data, fromRarityId) {
+    var r = rules(data)
+    var v = r.upgradeCosts && r.upgradeCosts[fromRarityId]
+    return Number.isFinite(Number(v)) && Number(v) >= 1 ? Math.floor(Number(v)) : r.costForUpgrade
+  }
   /**
    * 每个档位的「碎片 -> 抽卡券」比例。
    *
@@ -311,10 +337,10 @@
         // 升档：碎片够 **而且** 有更高一档。最高档没有「更高一级」。
         nextRarity: next,
         isTop: !next,
-        canUpgrade: !!next && have >= r.costForUpgrade,
-        missingForUpgrade: next ? Math.max(0, r.costForUpgrade - have) : 0,
+        canUpgrade: !!next && have >= upgradeCostFor(data, rar.id),
+        missingForUpgrade: next ? Math.max(0, upgradeCostFor(data, rar.id) - have) : 0,
         costForCard: r.costForCard,
-        costForUpgrade: r.costForUpgrade,
+        costForUpgrade: upgradeCostFor(data, rar.id),
       })
     }
     return out
@@ -385,13 +411,14 @@
     if (!next) {
       return { ok: false, error: known.label + ' 已经是最高档，没有更高一级可以升' }
     }
-    if (have < r.costForUpgrade) {
+    var upCost = upgradeCostFor(data, rarityId)
+    if (have < upCost) {
       return {
         ok: false,
-        error: known.label + ' 碎片不够：升档需要 ' + r.costForUpgrade + ' 个，现有 ' + have + ' 个',
+        error: known.label + ' 碎片不够：升档需要 ' + upCost + ' 个，现有 ' + have + ' 个',
       }
     }
-    return { ok: true, cost: r.costForUpgrade, card: null, nextRarity: next }
+    return { ok: true, cost: upCost, card: null, nextRarity: next }
   }
 
   /**
@@ -602,6 +629,7 @@
     FOIL_ID_FALLBACK: FOIL_ID_FALLBACK,
     foilIds: foilIds,
     rules: rules,
+    upgradeCostFor: upgradeCostFor,
     dreamRewardRules: dreamRewardRules,
     resetPlayer: resetPlayer,
     memorialCards: memorialCards,
