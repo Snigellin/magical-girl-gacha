@@ -69,10 +69,6 @@
     console.warn('[gacha] 配置里既没有 readonly 也没有 backend —— 页面会按动态站处理，请检查注入的配置。')
   }
 
-  var GITEE_RAW = 'https://gitee.com/qq1292012789/magical-girl-gacha/raw/main/'
-  var GITHUB_REPO = 'https://github.com/anyealeaf/magical-girl-gacha'
-  var GITHUB_RAW = GITHUB_REPO.replace('github.com/', 'raw.githubusercontent.com/') + '/main/'
-
   var SECTIONS = [
     { id: 'draw', label: '抽卡', hash: '#/draw' },
     // 「卡池一览」已删除：它展示的就是图鉴一级分组（卡池）的内容，功能重复。
@@ -1060,8 +1056,105 @@
   // Service Worker 是 Pages 上唯一能自己说了算的缓存层；这个区块提供
   // 「看缓存状态 / 一次抓好 / 清掉重来」三件事。
 
-  /** 缓存名必须与 page/sw.js 里的 CACHE_NAME 一致 */
+  /**
+   * 缓存名必须与 page/sw.js 里的 CACHE_NAME 一致。
+   *
+   * v1 -> v2：跨域镜像的图（opaque 响应）也要进缓存，键的形状与命中判据都变了，
+   * 直接沿用旧名字会让「同一条 URL 命中一条内容不对的旧记录」。改名之后
+   * sw.js 的 activate 会把 `gacha-img-` 开头的旧缓存全删掉，读者不会两头都占。
+   */
   var IMG_CACHE = 'gacha-img-v2'
+
+  /**
+   * 图片镜像基址（来自 `settings.imageMirror` / `settings.imageFallback`）。
+   *
+   * 只有**静态站**用得上：导出后 `imageUrl` 是 `assets/img/xxx` 这样的相对路径，
+   * 而国内直连 GitHub Pages 经常慢到超时；换成 Gitee 之类的镜像就快得多。
+   * 动态站的图片走 `api/image?src=…`，不匹配这个前缀，所以本机永远读磁盘。
+   *
+   * 返回值按优先级排列，只收 http(s) 的基址（写错了就当没填 —— 让图片回退到
+   * 站内相对路径，而不是变成一串坏 URL）。
+   *
+   * ⚠️ 要读**传进来的那份数据**，不能读 `state.data`：`loadData()` 里
+   * `state.data = normalizeSnapshot(inline)` 是**先算右边再赋值** ——
+   * 在 normalizeSnapshot 里读 state.data 拿到的是上一份（首次启动时是 null），
+   * 于是镜像一个都换不上，而且没有任何报错。
+   */
+  function mirrorBasesOf(data) {
+    var s = (data && data.settings) || {}
+    var out = []
+    var push = function (v) {
+      var raw = String(v == null ? '' : v).trim()
+      if (!/^https?:\/\//i.test(raw)) return
+      var base = raw.replace(/\/+$/, '') + '/'
+      if (out.indexOf(base) >= 0) return
+      out.push(base)
+    }
+    push(s.imageMirror)
+    push(s.imageFallback)
+    return out
+  }
+
+  /** 当前快照下的镜像基址（给抓图清单与测试用） */
+  function mirrorBases() {
+    return mirrorBasesOf(state.data)
+  }
+
+  /** 一个 `assets/img/...` 路径的完整候选链：镜像 -> 回退 -> 站内相对路径 */
+  function imageChain(rel) {
+    var bases = mirrorBases()
+    var out = []
+    for (var i = 0; i < bases.length; i++) out.push(bases[i] + rel)
+    out.push(rel)
+    return out
+  }
+
+  /**
+   * 把快照里所有 `assets/img/...` 的字符串换成镜像地址（就地进行，幂等）。
+   *
+   * 为什么要**递归扫整份快照**而不是逐字段改：图片 URL 散落在卡面、卡池封面、
+   * 横幅、首页封面、表情包、关注页配图/图标六处，逐一枚举必然漏 —— 而漏掉的那处
+   * 会静默地继续走慢线路（或反过来：一处改了、别处没改，排查时完全看不出规律）。
+   * 判据只有一条：**以 `assets/img/` 开头的字符串**。
+   *
+   * 幂等：改写后的字符串以 `https://…` 开头，不再匹配这个前缀，所以重复调用安全。
+   */
+  function mirrorAssetUrls(v, base) {
+    if (Array.isArray(v)) {
+      for (var i = 0; i < v.length; i++) v[i] = mirrorAssetUrls(v[i], base)
+      return v
+    }
+    if (v && typeof v === 'object') {
+      for (var k in v) {
+        if (Object.prototype.hasOwnProperty.call(v, k)) v[k] = mirrorAssetUrls(v[k], base)
+      }
+      return v
+    }
+    return typeof v === 'string' && /^(?:\.\/)?assets\/img\//.test(v) ? base + v.replace(/^\.\//, '') : v
+  }
+
+  /**
+   * 图片加载失败时的**多级回退**（镜像 -> 回退 -> 站内相对路径）。
+   *
+   * ⚠️ 两个细节都不能省：
+   *   1. 只有**真的换了下一条地址**才 `stopPropagation()`。卡面自己挂着一个
+   *      error 处理器（把「卡面读不到」写在卡上），而捕获阶段的 stopPropagation
+   *      会让事件到不了它 —— 于是三次都失败时页面上**一点痕迹都没有**，
+   *      这正是本项目最忌讳的那种失败。所以链走完了就放行，让卡面自己报错。
+   *   2. 认不出来源的图（不是 `assets/img/...`）一律不碰。
+   */
+  function onImageError(event) {
+    var img = event && event.target
+    if (!img || String(img.tagName || '').toUpperCase() !== 'IMG') return
+    var src = String(img.getAttribute('src') || '')
+    var m = src.match(/(?:^|\/)(assets\/img\/[^/]+)$/)
+    if (!m) return
+    var chain = imageChain(m[1])
+    var i = chain.indexOf(src)
+    if (i < 0 || i >= chain.length - 1) return
+    img.setAttribute('src', chain[i + 1])
+    if (event.stopPropagation) event.stopPropagation()
+  }
 
   function cacheSupported() {
     try {
@@ -1087,7 +1180,13 @@
     } catch (e) {}
   }
 
-  /** 所有值得缓存的图片 URL（卡面 + 卡池封面 + 横幅 + 首页封面 + 表情包） */
+  /**
+   * 所有值得缓存的图片 URL（卡面 + 卡池封面 + 横幅 + 首页封面 + 表情包 + 关注页配图）。
+   *
+   * ⚠️ 这份清单必须覆盖**每一个会画图的字段**：漏掉的那类图在「加载图片」里不会被
+   * 预抓，读者翻到它时还得现下 —— 而症状只是「有几张图偶尔慢」，很难联想到清单。
+   * （关注页的扫码图就是这么补进来的。）
+   */
   function allImageUrls() {
     var out = []
     var seen = {}
@@ -1102,6 +1201,10 @@
     ;(d.pools || []).forEach(function (p) {
       add(p.coverCardUrl)
       ;(p.bannerUrls || []).forEach(add)
+    })
+    ;(d.links || []).forEach(function (ln) {
+      add(ln.imageUrl)
+      add(ln.iconUrl)
     })
     var s = d.settings || {}
     add(s.coverImageUrl)
@@ -1127,6 +1230,25 @@
       return new URL(String(u), base).href
     } catch (e) {
       return String(u)
+    }
+  }
+
+  /**
+   * 这个 URL 是不是跨域的（镜像地址就是）。
+   *
+   * 判据用的是 `new URL` 而不是「字符串里有没有 http」：本机动态站的图片地址
+   * 可能也是绝对的（`http://127.0.0.1:3080/gacha/api/image?…`），那种是同源、
+   * 该带 same-origin 凭证。构造不出 URL 时按**同源**处理 —— 失效方向安全：
+   * 顶多让一次抓取按老路子走，不会把同源的请求变成 no-cors。
+   */
+  function isCrossOrigin(u) {
+    try {
+      var base = typeof location !== 'undefined' && location.href ? location.href : undefined
+      var abs = new URL(String(u), base)
+      var here = new URL(base || abs.href)
+      return abs.origin !== here.origin
+    } catch (e) {
+      return false
     }
   }
 
@@ -1244,14 +1366,19 @@
           var worker = function () {
             if (idx >= todo.length) return Promise.resolve()
             var u = todo[idx++]
-            var init = {}
-            if (u.indexOf(GITEE_RAW) === 0 || u.indexOf(GITHUB_RAW) === 0) {
+            var init = { credentials: 'same-origin' }
+            // 跨域镜像：必须 no-cors（它没有 CORS 头），拿回来的是一个 opaque 响应。
+            // 读不到内容是正常的 —— 我们只是把它原样存进缓存，之后由 <img> 自己去解码。
+            // 不带凭证也是对的：公开镜像不需要 cookie，带上反而会让请求变成非简单请求。
+            if (isCrossOrigin(u)) {
               init.mode = 'no-cors'
               init.credentials = 'omit'
             }
             if (force) init.cache = 'reload'
             return fetch(u, init)
               .then(function (res) {
+                // opaque 也算成功：Cache Storage 允许存不透明响应，
+                // 这正是「跨域图片也能一次抓好、之后离线可见」的依据。
                 if (res && (res.ok || res.type === 'opaque')) {
                   return cache.put(absUrl(u), res.clone()).then(function () { done++ })
                 }
@@ -4021,6 +4148,10 @@
         field('首页背景图（文件名或绝对路径）', input('text', s.coverImage, 'set-cover')),
         field('卡面比例（形如 2/3 或 832/1216）', input('text', s.cardRatio || '2/3', 'set-ratio')),
         field('图片目录（一行一个，受控白名单）', textarea(imageDirs.join('\n'), 3, 'set-dirs')),
+        // 图片镜像：国内直连 GitHub Pages 慢/超时的解法（只有静态站用得上）。
+        // 留空 = 关掉。填错（不是 http(s)）时脚本会打印一次警告并当作没填。
+        field('图片镜像基址（可空，例 https://gitee.com/用户/仓库/raw/main/）', input('text', s.imageMirror, 'set-mirror')),
+        field('图片镜像回退基址（可空，镜像挂了时用）', input('text', s.imageFallback, 'set-mirror-fallback')),
         field('页脚说明', input('text', s.footerNote, 'set-foot')),
         el('div', { class: 'panel-actions' }, [
           el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-settings' }, ['保存设置']),
@@ -4683,12 +4814,26 @@
           window.alert('卡面比例要写成 "2/3" 或 "832/1216" 这种（斜杠），现在是：' + ratioRaw)
           return
         }
+        var mirrorRaw = q('set-mirror') ? String(q('set-mirror').value).trim() : ''
+        var mirrorFallbackRaw = q('set-mirror-fallback') ? String(q('set-mirror-fallback').value).trim() : ''
+        // 镜像基址同样先验一次：写错一个字符，读者那边的图就全变成坏地址
+        //（页面会退回站内相对路径，所以不会白屏，但镜像等于白配了）
+        if (mirrorRaw && !/^https?:\/\//i.test(mirrorRaw)) {
+          window.alert('图片镜像基址要以 http:// 或 https:// 开头，现在是：' + mirrorRaw)
+          return
+        }
+        if (mirrorFallbackRaw && !/^https?:\/\//i.test(mirrorFallbackRaw)) {
+          window.alert('回退基址要以 http:// 或 https:// 开头，现在是：' + mirrorFallbackRaw)
+          return
+        }
         var body = {
           title: q('set-title').value,
           subtitle: q('set-subtitle').value,
           coverImage: q('set-cover').value.trim(),
           cardRatio: ratioRaw || '2/3',
           footerNote: q('set-foot').value,
+          imageMirror: mirrorRaw,
+          imageFallback: mirrorFallbackRaw,
           imageDirs: q('set-dirs')
             .value.split('\n')
             .map(function (x) { return x.trim() })
@@ -5201,36 +5346,16 @@
     }
   }
 
-  function mirrorRepoImages(v) {
-    if (Array.isArray(v)) {
-      for (var i = 0; i < v.length; i++) v[i] = mirrorRepoImages(v[i])
-      return v
-    }
-    if (v && typeof v === 'object') {
-      for (var k in v) v[k] = mirrorRepoImages(v[k])
-      return v
-    }
-    return typeof v === 'string' && /^(?:\.\/)?assets\/img\//.test(v) ? GITEE_RAW + v.replace(/^\.\//, '') : v
-  }
-
-  function onImageResourceError(event) {
-    var img = event.target
-    if (!img || img.tagName !== 'IMG') return
-    var src = img.getAttribute('src') || ''
-    var m = src.match(/(?:^|\/)(assets\/img\/[^/]+)$/)
-    if (!m) return
-    if (src.indexOf(GITEE_RAW) === 0) img.setAttribute('src', GITHUB_RAW + m[1])
-    else if (src.indexOf(GITHUB_RAW) === 0) img.setAttribute('src', m[1])
-    else return
-    event.preventDefault()
-    event.stopPropagation()
-  }
-
   /** 服务端回传的快照缺少派生字段时补齐，保证渲染代码只管读 */
   function normalizeSnapshot(data) {
     if (!data) return state.data
     if (!data.cards) data.cards = []
-    mirrorRepoImages(data)
+    // 静态站：把 `assets/img/...` 的图片换成镜像地址（没配镜像时这一句什么都不做）。
+    // 放在这里是因为**所有**渲染路径都从这里拿数据 —— 卡面、横幅、封面、表情包、
+    // 关注页配图一起换掉，不必逐处改。
+    // ⚠️ 基址要从 data 自己算（见 mirrorBasesOf 的说明：此刻 state.data 还没赋值）。
+    var bases = mirrorBasesOf(data)
+    if (bases.length) mirrorAssetUrls(data, bases[0])
     return data
   }
 
@@ -5973,7 +6098,9 @@
 
   function wire() {
     var e = state.els
-    window.addEventListener('error', onImageResourceError, true)
+    // 图片加载失败的多级回退（镜像 -> 回退 -> 站内相对路径）。
+    // 用**捕获**阶段：这样能在卡面自己的 error 处理器之前把地址换掉。
+    window.addEventListener('error', onImageError, true)
     if (e.unlockBtn) e.unlockBtn.addEventListener('click', openUnlock)
     if (e.lockBtn) {
       e.lockBtn.addEventListener('click', function () {
@@ -6191,5 +6318,8 @@
     // 而不是从渲染结果反推（反推在出问题时恰好最不可靠）
     memorialStatus: memorialStatus,
     noticeOnce: noticeOnce,
+    // 图片镜像：测试要能直接断言「抓图的清单」与「渲染用的地址」是同一份
+    allImageUrls: allImageUrls,
+    mirrorBases: mirrorBases,
   }
 })()
