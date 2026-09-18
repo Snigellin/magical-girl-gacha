@@ -406,6 +406,54 @@
     return out
   }
 
+  /**
+   * 三种工艺各自的**收集进度**（纯函数）。
+   *
+   * 用户 2026-09-18：「为卡片收集进度进行更新，新增面闪卡、全闪卡、红碎卡的收集进度」。
+   *
+   * 口径（这两条都要能解释给读者听，所以写在返回值里，页面直接照抄）：
+   *   · **分母 = 能拿到这门工艺的卡数** —— 不隐藏，且这一档达到了门槛
+   *     （平闪不限档位、全闪要 SSR+、红碎要 UR+）。拿不到的卡算进去只会让
+   *     进度永远到不了 100%，那是在骗人。
+   *   · **分子 = 已拥有、且工艺表里记着这一门的卡数** —— 两份数据缺一不可。
+   *     只按工艺表数的话，后台清一次进度（owned 清了、foils 留着）就会出现
+   *     「拥有 0 张却有 30 张平闪」。这条与图鉴格子的规则同源
+   *     （page.js 的 ownedFoils 也要求先拥有）。
+   *
+   * ⚠️ 分母**不看概率**：普通池的红碎是 0%，但追梦池有 1% —— 拿得到，
+   * 就该算进分母。概率只影响「要抽多久」，不影响「算不算收集品」。
+   *
+   * @returns {Array<{id:string,label:string,owned:number,total:number,pct:number}>}
+   */
+  function foilCollection(data, player) {
+    var cards = (data && data.cards) || []
+    var owned = (player && player.owned) || {}
+    var foils = (player && player.foils) || {}
+    var out = []
+    for (var k = 0; k < FOIL_KINDS.length; k++) {
+      var kind = FOIL_KINDS[k]
+      var total = 0
+      var got = 0
+      for (var i = 0; i < cards.length; i++) {
+        var c = cards[i]
+        if (!c || c.hidden) continue
+        if (!foilAllowed(data, kind.id, c.rarity)) continue
+        total += 1
+        if (!(Number(owned[c.id] || 0) > 0)) continue
+        var list = foils[c.id]
+        if (Array.isArray(list) && list.indexOf(kind.id) >= 0) got += 1
+      }
+      out.push({
+        id: kind.id,
+        label: kind.label || kind.id,
+        owned: got,
+        total: total,
+        pct: total ? got / total : 0,
+      })
+    }
+    return out
+  }
+
   // -------------------------------------------------------------------------
   // 核心
   // -------------------------------------------------------------------------
@@ -1100,6 +1148,7 @@
     foilAllowed: foilAllowed,
     foilRoll: foilRoll,
     foilsAfter: foilsAfter,
+    foilCollection: foilCollection,
     // 追梦池（动态概率）
     dreamConfig: dreamConfig,
     dreamAvailable: dreamAvailable,

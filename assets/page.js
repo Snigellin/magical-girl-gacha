@@ -2639,6 +2639,65 @@
     lsSet(LS.collapsed, m)
   }
 
+  /**
+   * 三种工艺各自的收集进度（图鉴顶部，跟在总进度条后面）。
+   *
+   * 用户 2026-09-18：「为卡片收集进度进行更新，新增面闪卡、全闪卡、红碎卡的收集进度」。
+   *
+   * 数字全部来自 `draw.js` 的 `foilCollection`（纯函数，与服务端判定同一套门槛），
+   * 这里只负责画。三种情况不画：
+   *   · 特殊工艺被关掉（`foils.enabled === false`）—— 一行 0 / 0 只会让人以为坏了
+   *   · 分母全是 0（数据里没有卡，或者门槛把每一档都排除了）
+   *   · 这一趟连卡都还没加载好
+   */
+  function foilProgressPanel() {
+    var g = G()
+    if (!g || typeof g.foilCollection !== 'function' || !state.data) return null
+    var cfg = (state.data.settings && state.data.settings.foils) || {}
+    if (cfg.enabled === false) return null
+    var rows = g.foilCollection(dataWithState(), player())
+    var anyTotal = false
+    for (var i = 0; i < rows.length; i++) if (rows[i].total > 0) anyTotal = true
+    if (!anyTotal) return null
+
+    var box = el('div', { class: 'foil-progress' }, [
+      el('div', { class: 'foil-progress-head' }, [
+        el('span', { class: 'foil-progress-title', text: '特殊工艺收集' }),
+        el('span', {
+          class: 'foil-progress-note',
+          text: '分母是「拿得到这门工艺的卡」：平闪不限档位，全闪 SSR 及以上，红碎 UR 及以上；分子只算已拥有、且真的抽到过这门工艺的卡。',
+        }),
+      ]),
+    ])
+
+    rows.forEach(function (r) {
+      var pct = Math.round(r.pct * 1000) / 10
+      var bar = el('div', { class: 'foil-progress-bar' }, [
+        el('div', { class: 'foil-progress-fill foil-fill-' + r.id }),
+      ])
+      var fillEl = bar.querySelector('.foil-progress-fill')
+      if (fillEl) fillEl.style.width = pct + '%'
+      box.appendChild(
+        el('div', { class: 'foil-progress-row', 'data-foil': r.id }, [
+          el('span', { class: 'foil-progress-key foil-key-' + r.id, text: r.label }),
+          el('span', { class: 'foil-progress-num', text: fmt(r.owned) + ' / ' + fmt(r.total) }),
+          el('span', { class: 'foil-progress-pct', text: pct + '%' }),
+          bar,
+        ])
+      )
+    })
+
+    // 全齐时给一句明确的话（否则「100%」和「还没抽到」在视觉上没区别）
+    var allDone = rows.length > 0
+    rows.forEach(function (r) {
+      if (r.owned < r.total) allDone = false
+    })
+    if (allDone) {
+      box.appendChild(el('div', { class: 'foil-progress-hint', text: '三种工艺都集齐了。' }))
+    }
+    return box
+  }
+
   function viewCollection() {
     var view = state.els.view
     var wrap = el('div', { class: 'sec' })
@@ -2668,6 +2727,10 @@
     var fill = bar.querySelector('.progress-fill')
     if (fill) fill.style.width = pct + '%'
     wrap.appendChild(bar)
+
+    // 特殊工艺的收集进度（平闪 / 全闪 / 红碎）：与上面那条同一套口径
+    var foilPanel = foilProgressPanel()
+    if (foilPanel) wrap.appendChild(foilPanel)
 
     if (!allCards.length) {
       wrap.appendChild(emptyBox('图鉴是空的', ['还没有任何卡牌。']))

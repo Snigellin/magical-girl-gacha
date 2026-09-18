@@ -834,6 +834,119 @@ body {
 }
 
 /* --------------------------------------------------------------------------
+   特殊工艺的收集进度（图鉴顶部，三行：平闪 / 全闪 / 红碎）
+   -------------------------------------------------------------------------- */
+
+.foil-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.foil-progress-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.foil-progress-title {
+  font-weight: 700;
+  font-size: 0.86rem;
+}
+
+.foil-progress-note {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.6;
+}
+
+/* 一行 = 工艺名 / 张数 / 百分比 / 进度条，四列对齐（窄屏时进度条落下一行） */
+.foil-progress-row {
+  display: grid;
+  grid-template-columns: 3.2rem 6.5rem 3.4rem 1fr;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.foil-progress-key {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+/* 与卡名、工艺胶囊同一套颜色，扫一眼就知道是哪一门 */
+.foil-key-flat {
+  color: #c9ced6;
+}
+
+.foil-key-full {
+  color: #b8860b;
+}
+
+.foil-key-shatter {
+  color: #e5484d;
+}
+
+.foil-progress-num {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--text-2);
+}
+
+.foil-progress-pct {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: right;
+}
+
+.foil-progress-bar {
+  height: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.foil-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.foil-fill-flat {
+  background: linear-gradient(90deg, #9aa3b0, #c9ced6);
+}
+
+.foil-fill-full {
+  background: linear-gradient(90deg, #c99a2e, #ffd257);
+}
+
+.foil-fill-shatter {
+  background: linear-gradient(90deg, #b02a2f, #ff6b6f);
+}
+
+.foil-progress-hint {
+  color: var(--ok);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+@media (max-width: 560px) {
+  .foil-progress-row {
+    grid-template-columns: 3.2rem 6.5rem 3.4rem;
+  }
+
+  .foil-progress-bar {
+    grid-column: 1 / -1;
+  }
+}
+
+/* --------------------------------------------------------------------------
    抽卡记录
    -------------------------------------------------------------------------- */
 
