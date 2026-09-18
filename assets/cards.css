@@ -473,6 +473,20 @@
   --background-y: 34%;
   /* 整体强度：默认低调，指针进入/拖动时提亮 */
   --foil-opacity: 0.42;
+  /*
+   * **光源可见度**：那层「跟着指针走的光」有多亮（1 = 正常，0 = 完全看不见）。
+   *
+   * 用户 2026-09-18：「在进行卡片检视的时候，把鼠标拖拽时候移动的光源改成
+   * 几乎看不见的透明光源，使得其不影响卡面本身的展示效果」。
+   * 所以拖动检视时它被压到 0.05（见下面的 .is-inspecting 规则）——
+   * 光**依然存在**（碎块的「光下变彩」、彩虹层的位移都还由 --pointer-* 驱动），
+   * 只是不再以一团可见的亮斑糊在卡面上。
+   *
+   * 为什么要单独一个变量、而不是直接改 --foil-opacity：
+   * --foil-opacity 管的是**整个工艺层**（彩虹、闪点、碎块）的强弱，
+   * 那是这张卡的身份，拖动时不该被抹掉；这里要压下去的只是「光源」本身。
+   */
+  --foil-light: 1;
   /* 彩虹调色板（"太阳柱"六色，取自上面提到的参考实现） */
   --foil-1: hsl(2, 100%, 73%);
   --foil-2: hsl(53, 100%, 69%);
@@ -630,7 +644,9 @@
   opacity: 0.8;
 }
 
-/* 以指针为中心的亮度衰减：光打在哪里，哪里最亮 */
+/* 以指针为中心的亮度衰减：光打在哪里，哪里最亮。
+   ⚠️ 这一层与下面的 glare 合起来就是「跟着指针走的那团光」，所以**两处都要**
+   乘 --foil-light —— 漏一处，拖动时就会剩下半团光继续糊在卡面上。 */
 .foil-shine::after {
   content: '';
   position: absolute;
@@ -643,6 +659,7 @@
   );
   mix-blend-mode: luminosity;
   filter: brightness(0.65) contrast(3.4);
+  opacity: var(--foil-light, 1);
 }
 
 /* 最上层的一道光晕（跟着指针走） */
@@ -655,6 +672,9 @@
   );
   mix-blend-mode: overlay;
   z-index: 6;
+  /* 必须写在 `.foil-shine, .foil-glare { opacity: var(--foil-opacity) }` **之后**：
+     权重相同，靠「后写的赢」。见 --foil-light 的说明。 */
+  opacity: calc(var(--foil-opacity) * var(--foil-light, 1));
 }
 
 /* --------------------------------------------------------------------------
@@ -1060,7 +1080,7 @@
 /*
  * 拖动中（`.is-inspecting` 由 page.js 在 pointerdown 时打上）。
  *
- * 三条都是为了「拖起来不卡」：
+ * 四条：
  *   1. **关掉过渡** —— 每帧都在写新值，过渡只会让画面慢半拍，还让合成器在帧与帧
  *      之间一直跑动画
  *   2. **提升为独立合成层**（will-change + translateZ(0)）—— 光效层带
@@ -1068,9 +1088,14 @@
  *      不用每帧重画整棵子树
  *   3. 悬停那一条也要一起覆盖：拖动时鼠标一定在卡上，`.card.card-inspect:hover`
  *      权重比这里高，不写就会把提升和「关过渡」一起顶掉
+ *   4. **把跟着指针走的光源压成几乎看不见**（--foil-light，用户 2026-09-18 要求）：
+ *      检视的目的是看**卡面本身**，而那团光会随着手一直糊在卡面上 ——
+ *      倾斜角度、彩虹位移、碎块的「光下变彩」全都照旧，只是不再有可见的亮斑。
+ *      光依旧是一盏「透明的灯」：位置还在驱动那些效果，只是它自己不发亮。
  */
 .card-inspect.is-inspecting,
 .card.card-inspect.is-inspecting:hover {
+  --foil-light: 0.05;
   transition: none;
   will-change: transform;
   transform: perspective(900px) rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg)) translateZ(0);

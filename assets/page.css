@@ -2418,6 +2418,206 @@ body:has(dialog[open]) .bar {
 }
 
 /* --------------------------------------------------------------------------
+   「关注安叶喵」板块
+
+   参考 dsh-magical-girl-catalog 的「关注安叶！」：一条链接一张卡片。
+   卡片在**没有链接**时仍然要长得像卡片（不能塌成一行文字）——
+   番茄小说那条就是「只有扫码图、没有可点地址」，它才是这个页面的主角。
+   -------------------------------------------------------------------------- */
+
+.link-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.9rem;
+}
+
+.link-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.link-card {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  color: inherit;
+  text-decoration: none;
+}
+
+.link-card.is-clickable {
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+
+.link-card.is-clickable:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lift);
+  border-color: var(--accent);
+}
+
+.link-card.is-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 不可点的卡片：左侧一道竖线，明确「这是信息，不是按钮」 */
+.link-card.is-static {
+  border-left: 3px solid var(--border-2);
+}
+
+.link-icon {
+  width: 2.4rem;
+  height: 2.4rem;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  border-radius: var(--radius-sm);
+  background: var(--accent-weak);
+}
+
+.link-icon-img {
+  width: 2.4rem;
+  height: 2.4rem;
+  flex: 0 0 auto;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.link-main {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.link-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  font-weight: 700;
+}
+
+.link-badge {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.link-url {
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.link-desc {
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+
+/* 配图（扫码图）：整张卡的正下方一行，宽度撑满 —— 二维码太小就扫不出来 */
+.link-qr {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+}
+
+/*
+ * 配图（番茄小说的分享海报，1219x1999 竖版）。
+ * 宽度给足（二维码要扫得出来），高度封顶 —— 竖版海报按原比例铺满会把整张卡片
+ * 拉到 400+ px 高，一屏只看得到一张卡。`object-fit: contain` 是必须的：
+ * 只写 max-height 会把图**压扁**（宽度还是 100%），看着像图坏了。
+ */
+.link-qr-img {
+  width: 100%;
+  max-width: 15rem;
+  max-height: 22rem;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+.link-qr-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* 链接不合法 / 什么都没有：写成一行可见的说明，不要静默 */
+.link-warn {
+  padding: 0.35rem 0.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--danger-weak);
+  color: var(--danger-strong);
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+/* --------------------------------------------------------------------------
+   后台的链接行（「关注安叶喵」那一块）
+   -------------------------------------------------------------------------- */
+
+/* 每条链接一张卡：不加边框的话，两行输入框看起来像同一组字段 */
+.link-admin-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.link-admin {
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+/* --------------------------------------------------------------------------
+   公告弹窗（缺纪念卡 -> 引导重置）
+   -------------------------------------------------------------------------- */
+.notice-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.notice-item {
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.notice-warn {
+  padding: 0.55rem 0.7rem;
+  border-radius: var(--radius-sm);
+  background: var(--danger-weak);
+  color: var(--danger-strong);
+  font-size: 0.82rem;
+  line-height: 1.65;
+}
+
+/* --------------------------------------------------------------------------
    窄屏
    -------------------------------------------------------------------------- */
 

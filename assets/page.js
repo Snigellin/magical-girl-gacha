@@ -76,6 +76,9 @@
     { id: 'collection', label: '图鉴', hash: '#/collection' },
     { id: 'shards', label: '碎片兑换', hash: '#/shards' },
     { id: 'history', label: '抽卡记录', hash: '#/history' },
+    // 「关注安叶喵」：参考 dsh-magical-girl-catalog 的「关注安叶！」板块。
+    // 放在后台管理之前 —— 那是给读者的内容，后台是给作者的。
+    { id: 'follow', label: '关注安叶喵', hash: '#/follow' },
     { id: 'admin', label: '后台管理', hash: '#/admin', needsEdit: true },
   ]
 
@@ -94,6 +97,19 @@
     pool: 'gacha.pool.v1',
     /** 哪些卡池切到了「追梦池」模式（读者偏好；花券的是读者，所以由他决定） */
     dream: 'gacha.dream.v1',
+  }
+
+  /**
+   * sessionStorage 键：**只在这一次「打开网站」里有效**。
+   *
+   * 与 LS 分开是刻意的：LS 里放的是「读者偏好 / 进度」，要跨次保留；
+   * 这里放的是「这一趟已经做过的事」。公告弹窗的「每次打开最多一次」
+   * 就是这个语义 —— 放进 LS 会变成「一辈子只弹一次」（读者换台机器或
+   * 清了缓存又会弹，而不是按次）。
+   */
+  var SS = {
+    /** 公告弹窗这一趟是否已经弹过 */
+    notice: 'gacha.notice.v1',
   }
 
   var state = {
@@ -126,6 +142,11 @@
     foilViewDirty: false,
     /** 大图弹层当前显示的卡 id */
     cardOpen: '',
+    /**
+     * 公告弹窗在这**一次打开**里是否已经弹过（内存标记）。
+     * 与 sessionStorage 里的标记一起把关，见 noticeOnce。
+     */
+    noticeShown: false,
     els: {},
   }
 
@@ -360,6 +381,42 @@
     } catch (err) {
       console.warn('[gacha] 写入 localStorage 失败：' + key, err)
       toast('本机存储写入失败（可能是隐私模式或配额满）：抽卡记录无法保存', 'error')
+      return false
+    }
+  }
+
+  /**
+   * sessionStorage：**会话级**的标记。
+   *
+   * 与 localStorage 的区别正好是公告弹窗要的语义：「每次打开网站最多一次」
+   * —— 刷新还是同一次打开（不该再弹），关掉标签页再进来才算新的一次。
+   *
+   * ⚠️ 它可能整个不可用（隐私模式、被策略禁用、file:// 打开）。所以每条读写都
+   * 自己 try/catch 并**退回内存标记**（调用方另有一份内存标记，见 noticeOnce）；
+   * 少了这一层，页面会在读取时抛异常，表现成「开了网站什么都没发生」。
+   */
+  function ssGet(key, fallback) {
+    try {
+      var store = window.sessionStorage
+      if (!store) return fallback
+      var raw = store.getItem(key)
+      if (!raw) return fallback
+      var parsed = JSON.parse(raw)
+      return parsed === null || parsed === undefined ? fallback : parsed
+    } catch (err) {
+      console.warn('[gacha] 读取 sessionStorage 失败（将退回内存标记）：' + key, err)
+      return fallback
+    }
+  }
+
+  function ssSet(key, value) {
+    try {
+      var store = window.sessionStorage
+      if (!store) return false
+      store.setItem(key, JSON.stringify(value))
+      return true
+    } catch (err) {
+      console.warn('[gacha] 写入 sessionStorage 失败：' + key, err)
       return false
     }
   }
@@ -3615,6 +3672,221 @@
   }
 
   // -------------------------------------------------------------------------
+  // ⑤a 公告弹窗：缺纪念卡时引导去重置（每次打开最多一次）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 纪念卡的持有情况。
+   *
+   * 「缺不缺」的判据是**拥有数 < 数据里的纪念卡总数**，而不是写死 4 ——
+   * 作者后来又加过一张（奇迹·追加），写死数字的话加了新卡也永远不会提示。
+   * 列表本身走 page/shards.js 的 memorialCards（与服务端、导出同一套规则）。
+   */
+  function memorialStatus() {
+    var S = window.GachaShards
+    var all = S && typeof S.memorialCards === 'function' ? S.memorialCards(state.data) : []
+    var have = collection()
+    var owned = []
+    var missing = []
+    for (var i = 0; i < all.length; i++) {
+      var c = all[i]
+      if (Number(have[c.id] || 0) > 0) owned.push(c)
+      else missing.push(c)
+    }
+    return { total: all.length, owned: owned, missing: missing }
+  }
+
+  /**
+   * 这一次「打开网站」是否已经弹过。
+   *
+   * 两层标记缺一不可：
+   *   · 内存：同一次打开里 render() 会跑很多次，只有内存标记能保证不再弹；
+   *   · sessionStorage：刷新页面是**同一次打开**，不该重弹（关掉标签页才归零）。
+   * 存储不可用时（隐私模式/被禁用）只靠内存标记，退化成「刷新会再弹一次」——
+   * 比整个弹窗失效要好，而且不会报错。
+   */
+  function noticeSeen() {
+    if (state.noticeShown) return true
+    return ssGet(SS.notice, false) === true
+  }
+
+  function noticeMarkSeen() {
+    state.noticeShown = true
+    ssSet(SS.notice, true)
+  }
+
+  function closeNotice() {
+    hide(state.els.noticeDialog)
+  }
+
+  /**
+   * 公告：缺纪念卡 -> 引导重置。
+   *
+   * 只在启动时判断一次（用户要求「每次网站打开最多只弹出一次」）。
+   * 判断依据是**读者自己的收藏**：动态站看服务端 player，静态站看 localStorage。
+   */
+  function noticeOnce() {
+    var dlg = state.els.noticeDialog
+    if (!dlg || !state.data) return false
+    if (noticeSeen()) return false
+
+    var st = memorialStatus()
+    if (!st.total) return false // 数据里一张纪念卡都没有（比如作者还没建）—— 不弹
+    if (!st.missing.length) return false // 已经集齐
+
+    var e = state.els
+    if (e.noticeTitle) e.noticeTitle.textContent = '你还没有集齐纪念卡'
+    if (e.noticeLead) {
+      e.noticeLead.textContent =
+        '本站共有 ' + st.total + ' 张纪念卡，你已拥有 ' + st.owned.length + ' 张。' +
+        '它们不在任何卡池里，也不能用碎片合成 —— 只能通过「清空缓存（重置存档）」赠送。'
+    }
+    if (e.noticeList) {
+      clear(e.noticeList)
+      st.missing.forEach(function (c) {
+        e.noticeList.appendChild(el('span', { class: 'notice-item', text: '缺：' + c.name }))
+      })
+    }
+    // 赠送的数字必须与 resetPlayer 实际给的一致 —— 两处共用 shards.js 的 resetGift
+    var S = window.GachaShards
+    var rs = S && typeof S.resetGift === 'function' ? S.resetGift(state.data) : { points: 0, tickets: 0 }
+    if (e.noticeWarn) {
+      e.noticeWarn.textContent =
+        '⚠️ 重置会清空你现在的卡牌、碎片、点数与抽卡券，无法撤销。' +
+        '重置后会赠送：点数 ' + rs.points +
+        '、抽卡券 ' + rs.tickets +
+        ' 张，以及全部 ' + st.total + ' 张纪念卡（每张同时拥有平闪 / 全闪 / 红碎）。'
+    }
+
+    noticeMarkSeen()
+    showModal(dlg)
+    return true
+  }
+
+  // -------------------------------------------------------------------------
+  // ⑤b 板块：关注安叶喵
+  // -------------------------------------------------------------------------
+
+  /**
+   * 只认 http(s) 的地址。
+   *
+   * 为什么必须挡：`javascript:` 与 `data:` 开头的地址塞进 href 就是一个可点的
+   * XSS 入口；而这里的内容是作者在后台填的自由文本。挡下来之后**不能静默**——
+   * 页面上要显示「这个链接不是 http(s)，没启用点击」（见 linkCard），
+   * 否则作者只会以为「我填了但没生效」。
+   */
+  function httpHref(raw) {
+    var s = String(raw == null ? '' : raw).trim()
+    if (!s) return ''
+    if (!/^https?:\/\//i.test(s)) return ''
+    return s
+  }
+
+  /**
+   * 「关注安叶喵」板块（参考 dsh-magical-girl-catalog 的「关注安叶！」）。
+   *
+   * 图片 URL 一律由服务端/导出脚本算好（`imageUrl` / `iconUrl`），前端不拼路径
+   * —— 与卡面 / 卡池横幅 / 表情包同一套纪律：拼路径的规则写两份必然错位。
+   */
+  function viewFollow() {
+    var view = state.els.view
+    var wrap = el('div', { class: 'sec' })
+    var links = (state.data && state.data.links) || []
+    var shown = links.filter(function (ln) {
+      return ln && !ln.hidden
+    })
+
+    wrap.appendChild(
+      sectionHead('关注安叶喵', '找到作者与作品。世界观、角色图鉴、小说原文都从这里走。', [
+        el('span', { class: 'pill', text: shown.length + ' 个入口' }),
+      ])
+    )
+
+    if (!shown.length) {
+      wrap.appendChild(
+        emptyBox('这里还没有链接', [
+          '数据里的 links 是空的，或者每一条都被标成了「隐藏」。',
+          BACKEND
+            ? '在「后台管理」的「关注安叶喵」一块里加一条，保存后这里就有内容。'
+            : '这是静态站：内容由作者在本机改完后重新发布，读者这边改不了。',
+        ])
+      )
+      view.appendChild(wrap)
+      return
+    }
+
+    var grid = el('div', { class: 'link-grid' })
+    shown.forEach(function (ln) {
+      grid.appendChild(linkCard(ln))
+    })
+    wrap.appendChild(grid)
+
+    // 被隐藏的条目只对作者提一句：读者看不到，也就不会怀疑「我明明加了」
+    var hiddenCount = links.length - shown.length
+    if (hiddenCount > 0 && canEdit()) {
+      wrap.appendChild(
+        el('p', { class: 'panel-hint', text: '另有 ' + hiddenCount + ' 条链接被标为「隐藏」，读者看不到（下面是全部已显示的）。' })
+      )
+    }
+
+    view.appendChild(wrap)
+  }
+
+  /**
+   * 一张链接卡片。三种形态，别混：
+   *   · 有 http(s) 链接 -> 整张卡是可点的 `<a>`（新标签打开，rel=noopener noreferrer）
+   *   · 没链接但有配图  -> 不可点，把配图放大展示（番茄小说那种扫码入口）
+   *   · 链接不合法      -> 不可点，并**说明为什么**（填错时一眼看得出）
+   */
+  function linkCard(ln) {
+    var href = httpHref(ln.url)
+    var kids = [
+      ln.iconUrl
+        ? el('img', { class: 'link-icon-img', src: ln.iconUrl, alt: '', loading: 'lazy', draggable: 'false' })
+        : el('div', { class: 'link-icon', text: ln.icon || '🔗' }),
+      el('div', { class: 'link-main' }, [
+        el('div', { class: 'link-title' }, [
+          el('span', { class: 'link-name', text: ln.title || '（未命名链接）' }),
+          ln.badge ? el('span', { class: 'link-badge', text: ln.badge }) : null,
+        ]),
+        ln.url ? el('div', { class: 'link-url', text: ln.url }) : null,
+        ln.desc ? el('div', { class: 'link-desc', text: ln.desc }) : null,
+      ]),
+    ]
+
+    // 配图单独占一行：和文字并排会被挤得很小，而扫码需要它够大
+    if (ln.imageUrl) {
+      kids.push(
+        el('div', { class: 'link-qr' }, [
+          el('img', {
+            class: 'link-qr-img',
+            src: ln.imageUrl,
+            alt: (ln.title || '链接') + ' 的配图',
+            loading: 'lazy',
+            draggable: 'false',
+          }),
+          el('div', { class: 'link-qr-hint', text: ln.badge || '扫码打开' }),
+        ])
+      )
+    }
+
+    var card = href
+      ? el('a', { class: 'link-card is-clickable', href: href, target: '_blank', rel: 'noopener noreferrer' }, kids)
+      : el('div', { class: 'link-card is-static' }, kids)
+
+    var holder = el('div', { class: 'link-cell' }, [card])
+    // 填了地址但不合法：不做成可点的，但要把原因写在脸上
+    if (ln.url && !href) {
+      holder.appendChild(el('div', { class: 'link-warn', text: '⚠️ 这个地址不是 http(s)，没有启用点击：' + ln.url }))
+    }
+    // 既没有链接也没有配图：这张卡什么也做不了，明说
+    if (!ln.url && !ln.imageUrl) {
+      holder.appendChild(el('div', { class: 'link-warn', text: '⚠️ 这条既没有链接也没有配图，所以点了没有反应。' }))
+    }
+    return holder
+  }
+
+  // -------------------------------------------------------------------------
   // ⑥ 板块：后台管理
   // -------------------------------------------------------------------------
 
@@ -3767,6 +4039,8 @@
         // 卡池 UI（横幅）目录：和表情包一样必须与「图片目录」分开 ——
         // 合在一起的话「扫描卡池」会把横幅当成卡牌扫进名册。
         field('卡池 UI 目录（主视觉/横幅，一行一个，受控白名单）', textarea(poolUiDirs.join('\n'), 3, 'pool-ui-dirs')),
+        // 关注页配图目录：同样只转发、不扫描（放 imageDirs 里会被扫成一张卡）
+        field('关注页配图目录（扫码图等，一行一个，受控白名单）', textarea((Array.isArray(s.linkDirs) ? s.linkDirs : []).join('\n'), 2, 'link-dirs')),
         el('div', { class: 'panel-sub' }, rarityOpts.map(function (r) {
           return field(
             '表情包 · ' + (r.label || r.id) + '（文件名，留空 = 这一档不弹）',
@@ -4021,6 +4295,34 @@
       ])
     )
 
+    // --- 关注安叶喵（链接卡片） -------------------------------------------
+    //
+    // 「关注安叶喵」板块的内容源。整份一起存（`POST api/links.json`）：链接最多
+    // 几十条，一条一条做增删改反而会出现「删了 A 又加了 B，顺序乱了」这类问题。
+    //
+    // ⚠️ 「新增一条」是**就地插一行**，不是重新渲染整个后台：后台里还有几十个
+    // 输入框（卡池权重、卡牌表），重画一次就会把作者刚填、还没保存的内容全丢掉。
+    var linkRows = el('div', { class: 'link-admin-rows', 'data-bind': 'link-rows' })
+    ;(Array.isArray(state.data.links) ? state.data.links : []).forEach(function (ln) {
+      linkRows.appendChild(linkAdminRow(ln))
+    })
+    wrap.appendChild(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'panel-title', text: '④-2 关注安叶喵（链接卡片）' }),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '顶栏「关注安叶喵」页面上的卡片。配图要放在上面的「关注页配图目录」里（只转发、不会被当成卡牌扫进名册）；' +
+            '图标位填 emoji 就画 emoji，填图片文件名就画图。',
+        }),
+        linkRows,
+        el('div', { class: 'panel-actions' }, [
+          el('button', { class: 'btn', type: 'button', 'data-bind': 'link-add' }, ['新增一条']),
+          el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-links' }, ['保存链接']),
+        ]),
+      ])
+    )
+
     // --- 秘钥 -------------------------------------------------------------
     wrap.appendChild(
       el('div', { class: 'panel' }, [
@@ -4065,6 +4367,40 @@
       s.appendChild(opt)
     })
     return s
+  }
+
+  /**
+   * 后台里的一条「关注安叶喵」链接行。
+   *
+   * 抽成模块级函数（而不是写在 viewAdmin 里）是因为**两个地方都要用它**：
+   * 渲染已有条目（viewAdmin）与「新增一条」（wireAdmin）。写在 viewAdmin 里的话，
+   * 新增按钮就只能靠重新渲染整个后台来显示新行 —— 那会把作者刚填、还没保存的
+   * 内容全部丢掉。
+   *
+   * 每个输入框都带 `data-bind` 名字（不带序号）：读取时是**按行**查
+   * （row.querySelector），所以同名不会互相干扰。
+   */
+  function linkAdminRow(ln) {
+    var src = ln || {}
+    var row = el('div', { class: 'panel-sub link-admin', 'data-link-row': '', 'data-link-id': src.id || '' }, [
+      field('名称', input('text', src.title, 'link-title')),
+      field('链接（http:// 或 https:// 开头；留空 = 不可点，只展示配图）', input('text', src.url, 'link-url')),
+      field('图标（一个 emoji，或图片文件名）', input('text', src.icon, 'link-icon')),
+      field('角标（如「扫码阅读」，留空则不显示）', input('text', src.badge, 'link-badge')),
+      field('说明', textarea(src.desc, 2, 'link-desc')),
+      field('配图（文件名或绝对路径，例如 番茄小说分享图.jpg）', input('text', src.image, 'link-image')),
+      field('隐藏（读者看不到）', select(['false', 'true'], String(!!src.hidden), 'link-hidden')),
+      el('div', { class: 'panel-actions' }, [
+        el('button', { class: 'btn ghost', type: 'button', 'data-link-del': '' }, ['删除这一条']),
+      ]),
+    ])
+    var del = row.querySelector('[data-link-del]')
+    if (del) {
+      del.addEventListener('click', function () {
+        row.remove()
+      })
+    }
+    return row
   }
 
   function buildCardTable() {
@@ -4217,6 +4553,52 @@
           .catch(function (err) {
             out('scan-out', '读取失败：' + err.message, true)
           })
+      })
+    }
+
+    // 关注安叶喵：新增一行 / 保存整份
+    var linkAdd = q('link-add')
+    if (linkAdd) {
+      linkAdd.addEventListener('click', function () {
+        var rows = q('link-rows')
+        if (!rows) return
+        // 就地插一行，**不重新渲染**（见 linkAdminRow 的说明）
+        rows.appendChild(linkAdminRow({ icon: '🔗' }))
+      })
+    }
+
+    var saveLinks = q('save-links')
+    if (saveLinks) {
+      saveLinks.addEventListener('click', function () {
+        var rows = q('link-rows')
+        var list = []
+        var fields = rows ? rows.querySelectorAll('[data-link-row]') : []
+        for (var i = 0; i < fields.length; i++) {
+          var row = fields[i]
+          var val = function (bind) {
+            var node = row.querySelector('[data-bind="' + bind + '"]')
+            return node ? String(node.value == null ? '' : node.value) : ''
+          }
+          var title = val('link-title').trim()
+          var url = val('link-url').trim()
+          var image = val('link-image').trim()
+          // 名称、链接、配图全空的条目直接丢掉：那多半是点了「新增一条」又没填。
+          // 存进去会在页面上变成一张「（未命名链接）」的空卡。
+          if (!title && !url && !image) continue
+          list.push({
+            id: row.getAttribute('data-link-id') || '',
+            title: title,
+            url: url,
+            icon: val('link-icon').trim(),
+            badge: val('link-badge').trim(),
+            desc: val('link-desc'),
+            image: image,
+            hidden: val('link-hidden') === 'true',
+          })
+        }
+        request('/links.json', { method: 'POST', body: { links: list } })
+          .then(function (res) { afterWrite(res, '链接已保存（' + list.length + ' 条）') })
+          .catch(fail)
       })
     }
 
@@ -4473,6 +4855,12 @@
               .map(function (x) { return x.trim() })
               .filter(Boolean)
           : []
+        var linkDirsNext = q('link-dirs')
+          ? q('link-dirs')
+              .value.split('\n')
+              .map(function (x) { return x.trim() })
+              .filter(Boolean)
+          : []
         var emoji = {}
         var emojiRaritiesNext = []
         for (var j = 0; j < rar.length; j++) {
@@ -4488,6 +4876,7 @@
           body: {
             emojiDirs: emojiDirsNext,
             poolUiDirs: poolUiDirsNext,
+            linkDirs: linkDirsNext,
             emoji: emoji,
             reveal: {
               enabled: enabledSel ? enabledSel.value !== 'false' : true,
@@ -4916,7 +5305,10 @@
     if (box) clear(box)
     if (tip) {
       tip.hidden = false
-      tip.textContent = '拖动卡面可以换个角度看' + (shown ? '（闪卡的光会跟着动）' : '')
+      // 拖动时那团光已经压成「透明的灯」（用户 2026-09-18：光源几乎看不见，
+      // 不挡卡面），所以这里说的是「碎块随光显影」而不是「光会跟着动」——
+      // 提示要与实际看到的东西一致，否则读者会以为功能坏了。
+      tip.textContent = '拖动卡面可以换个角度看' + (shown ? '（光会跟着走，但不会挡住卡面）' : '')
     }
     if (!box) return
     if (!owned.length) {
@@ -5285,7 +5677,11 @@
     if (e.brandTitle) e.brandTitle.textContent = d.settings.title || '魔法少女抽卡'
     // 配置坏了就不许覆盖标题 —— 那个标题是唯一的失败痕迹
     if (!state.configBroken) {
-      document.title = (d.settings.title || '魔法少女抽卡') + (state.route === 'draw' ? '' : ' · ' + state.route)
+      // 板块名用**顶栏那个中文标签**，不是路由 id：标签页上写「· follow」
+      // 对读者没有任何意义（历史遗留，顺手一起改了）
+      var secLabel = ''
+      for (var sx = 0; sx < SECTIONS.length; sx++) if (SECTIONS[sx].id === state.route) secLabel = SECTIONS[sx].label
+      document.title = (d.settings.title || '魔法少女抽卡') + (state.route === 'draw' ? '' : ' · ' + (secLabel || state.route))
     }
 
     if (e.footNote) e.footNote.textContent = d.settings.footerNote || ''
@@ -5414,6 +5810,7 @@
       else if (state.route === 'collection') viewCollection()
       else if (state.route === 'shards') viewShards()
       else if (state.route === 'history') viewHistory()
+      else if (state.route === 'follow') viewFollow()
       else if (state.route === 'admin') viewAdmin()
     } catch (err) {
       console.error('[gacha] 渲染板块「' + state.route + '」时出错：', err)
@@ -5464,6 +5861,8 @@
     e.cardDialog = document.getElementById('card-dialog')
     e.cacheDialog = document.getElementById('cache-dialog')
     e.resetDialog = document.getElementById('reset-dialog')
+    // 公告弹窗：没有 data-bind 的容器（它是整块的），所以按 id 取
+    e.noticeDialog = document.getElementById('notice-dialog')
 
     // 缺失的绑定必须说出来 —— 否则只会表现成「某个角落不更新」，极难定位
     var REQUIRED = ['view', 'nav', 'brandTitle', 'warning', 'currency', 'shardChip', 'unlockBtn', 'lockBtn', 'toast']
@@ -5541,6 +5940,15 @@
     }
     if (e.shardChip) {
       e.shardChip.addEventListener('click', function () { go('#/shards') })
+    }
+    // 公告弹窗：两个按钮。**去重置**只是把第二级确认打开，真正的清空仍要等 5 秒，
+    // 所以这里不会因为误点就丢进度。
+    if (e.noticeLater) e.noticeLater.addEventListener('click', closeNotice)
+    if (e.noticeReset) {
+      e.noticeReset.addEventListener('click', function () {
+        closeNotice()
+        openResetDialog()
+      })
     }
 
     window.addEventListener('hashchange', render)
@@ -5641,6 +6049,9 @@
         var gift = claimDailyGift()
         render()
         if (gift) toast('每日赠送：+' + gift.points + ' 点（每点可以普通抽一次）', 'ok')
+        // 公告弹窗：缺纪念卡时引导去重置（用户要求「每次网站打开最多只弹出一次」）。
+        // 放在 render 之后、每日赠送提示之后 —— 弹层会盖住页面，先让首屏画完。
+        noticeOnce()
         // 顶栏「加载图片」的文案要看本地已经有多少张，数据到位后才能算
         paintCacheLoadButton()
         var route = parseRoute()
@@ -5678,5 +6089,9 @@
     cardFigure: cardFigure,
     el: el,
     canEdit: canEdit,
+    // 公告弹窗：测试要能直接问「现在该不该弹」「弹过了没有」，
+    // 而不是从渲染结果反推（反推在出问题时恰好最不可靠）
+    memorialStatus: memorialStatus,
+    noticeOnce: noticeOnce,
   }
 })()

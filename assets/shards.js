@@ -564,6 +564,27 @@
   }
 
   /**
+   * 「清空缓存（重置存档）」之后会拿到多少资源（点数 / 抽卡券）。
+   *
+   * 为什么单独抽成一个公开函数：**公告弹窗也要把这两个数说出来**
+   *（「重置后会赠送：点数 300、抽卡券 20 张」）。弹窗自己读 settings 的话，
+   * 数据里没配这一段时它会写「点数 0」，而 resetPlayer 实际给的是默认的 300
+   * —— 那就是界面在骗人。所以两处都走这一份，兜底值也只有一处。
+   */
+  function resetGift(data) {
+    var s = (data && data.settings) || {}
+    var rs = s.reset && typeof s.reset === 'object' ? s.reset : {}
+    var pick = function (v, fallback) {
+      var n = Number(v)
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
+    }
+    return {
+      points: pick(rs.points, RESET_DEFAULTS.points),
+      tickets: pick(rs.tickets, RESET_DEFAULTS.tickets),
+    }
+  }
+
+  /**
    * 「清空缓存」：把存档重置成起始状态 + 赠送纪念卡（**纯函数**）。
    *
    * 用户 2026-09-18：「清空当前拥有的所有碎片、卡牌，点数重置到 300，
@@ -575,10 +596,9 @@
    * **它们不进任何卡池**（见 lib/data.js 的 poolCardIds）。
    */
   function resetPlayer(data) {
-    var s = (data && data.settings) || {}
-    var rs = s.reset && typeof s.reset === 'object' ? s.reset : {}
-    var points = Number.isFinite(Number(rs.points)) && Number(rs.points) >= 0 ? Math.floor(Number(rs.points)) : RESET_DEFAULTS.points
-    var tickets = Number.isFinite(Number(rs.tickets)) && Number(rs.tickets) >= 0 ? Math.floor(Number(rs.tickets)) : RESET_DEFAULTS.tickets
+    var giftCfg = resetGift(data)
+    var points = giftCfg.points
+    var tickets = giftCfg.tickets
 
     var gift = []
     var owned = {}
@@ -631,6 +651,7 @@
     rules: rules,
     upgradeCostFor: upgradeCostFor,
     dreamRewardRules: dreamRewardRules,
+    resetGift: resetGift,
     resetPlayer: resetPlayer,
     memorialCards: memorialCards,
     ticketRules: ticketRules,
