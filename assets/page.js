@@ -70,7 +70,7 @@
   }
 
   var GITEE_RAW = 'https://gitee.com/qq1292012789/magical-girl-gacha/raw/main/'
-  var GITHUB_REPO = 'https://github.com/Snigellin/magical-girl-gacha'
+  var GITHUB_REPO = 'https://github.com/anyealeaf/magical-girl-gacha'
   var GITHUB_RAW = GITHUB_REPO.replace('github.com/', 'raw.githubusercontent.com/') + '/main/'
 
   var SECTIONS = [
