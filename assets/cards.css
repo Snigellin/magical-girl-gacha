@@ -60,6 +60,10 @@
   object-fit: contain;
   display: block;
   z-index: 2;
+  /* 卡面不是「可拖出去的文件」：浏览器自带的图片拖拽会跟检视/点开手势打架
+     （属性层面另有 draggable="false"，见 page.js 的 cardFigure） */
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
 }
 
 /* 占位层：图片盖在它上面。慢网/缺图时它是内容，不是空白 */
@@ -436,3 +440,584 @@
   max-height: 2.6em;
   overflow: hidden;
 }
+
+/* ==========================================================================
+   特殊工艺（闪卡）—— 卡图**不动**，只在卡面上叠几层纯 CSS 光效
+   --------------------------------------------------------------------------
+   三档（id 与判定在 lib/data.js 的 FOIL_KINDS / page/draw.js 的 foilRoll）：
+
+     .card-foil-flat      平闪 —— 一层光膜 + 细闪点，卡名银灰
+     .card-foil-full      全闪 —— 全卡彩虹闪 + 按稀有度的浮雕边框，卡名金色
+     .card-foil-shatter   红碎 —— 爆闪 + 浮雕感 + 边框外散红点，卡名红字暗红描边
+
+   实现手法参考了 simeydotme/pokemon-cards-css（MIT）那套「指针驱动的全息卡」：
+     · 位置由 CSS 变量描述：--pointer-x/y（光照中心）、--background-x/y（背景偏移）、
+       --foil-opacity（整体强度）
+     · 彩虹/闪点层的 background-position 写成变量的**线性函数**
+       （`calc(((50% - var(--background-x)) * 2.6) + 50%)`），于是拖动卡面时
+       光带会跟着走 —— 这是整套效果的关键，比自己算角度再改滤镜稳得多
+     · 分三层叠：底纹（彩虹/闪点）+ 金属条/颗粒 + 以指针为中心的亮度衰减，
+       分别用 color-dodge / hard-light / luminosity 混合
+   本项目的差异：不用任何图片素材（纯 CSS + 一个内联 SVG 闪点贴图，
+   CSP 允许 img-src data:），也不做 3D 翻面 —— 只在检视时整体倾斜。
+
+   ⚠️ 所有位置都用百分比 / 变量表达，**没有内联 style 属性**（CSP: style-src 'self'）。
+   ========================================================================== */
+
+.card,
+.card-dialog-card {
+  /* 光照中心：默认略微偏左上，看着像有光源在左上方 */
+  --pointer-x: 32%;
+  --pointer-y: 24%;
+  --background-x: 42%;
+  --background-y: 34%;
+  /* 整体强度：默认低调，指针进入/拖动时提亮 */
+  --foil-opacity: 0.42;
+  /* 彩虹调色板（"太阳柱"六色，取自上面提到的参考实现） */
+  --foil-1: hsl(2, 100%, 73%);
+  --foil-2: hsl(53, 100%, 69%);
+  --foil-3: hsl(93, 100%, 69%);
+  --foil-4: hsl(176, 100%, 76%);
+  --foil-5: hsl(228, 100%, 74%);
+  --foil-6: hsl(283, 100%, 73%);
+  /*
+   * 碎闪贴图：24 个大小/透明度都散开的小圆点，内联 SVG（CSP 的 img-src 允许 data:）。
+   * 为什么不放一张 png：本项目至今**没有任何装饰性二进制素材**，
+   * 为了一张点阵图引入一个文件不划算；SVG 还能随 card 尺寸无损缩放。
+   * 坐标是固定种子生成的（不是每次随机的），否则每张卡的闪光花纹都不一样。
+   */
+  --foil-glitter: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='90' height='90'%3E%3Cg fill='%23fff'%3E%3Ccircle cx='4.9' cy='75.8' r='1.14' opacity='0.75'/%3E%3Ccircle cx='21.4' cy='4.9' r='1.10' opacity='0.43'/%3E%3Ccircle cx='56.6' cy='4.9' r='0.99' opacity='0.69'/%3E%3Ccircle cx='15.2' cy='34.0' r='1.53' opacity='0.70'/%3E%3Ccircle cx='38.8' cy='38.9' r='1.14' opacity='0.68'/%3E%3Ccircle cx='3.9' cy='31.3' r='0.85' opacity='0.77'/%3E%3Ccircle cx='36.0' cy='54.9' r='1.05' opacity='0.50'/%3E%3Ccircle cx='39.8' cy='39.6' r='1.59' opacity='0.35'/%3E%3Ccircle cx='33.7' cy='21.3' r='0.80' opacity='0.72'/%3E%3Ccircle cx='60.3' cy='61.9' r='1.46' opacity='0.59'/%3E%3Ccircle cx='41.8' cy='9.9' r='0.79' opacity='0.54'/%3E%3Ccircle cx='10.9' cy='79.0' r='1.18' opacity='0.87'/%3E%3Ccircle cx='22.3' cy='3.8' r='0.91' opacity='0.43'/%3E%3Ccircle cx='39.8' cy='24.7' r='0.62' opacity='0.79'/%3E%3Ccircle cx='76.9' cy='76.1' r='1.29' opacity='0.69'/%3E%3Ccircle cx='23.3' cy='85.5' r='1.13' opacity='0.61'/%3E%3Ccircle cx='80.2' cy='65.9' r='1.02' opacity='0.88'/%3E%3Ccircle cx='57.0' cy='44.8' r='1.50' opacity='0.82'/%3E%3Ccircle cx='70.6' cy='19.0' r='0.52' opacity='0.79'/%3E%3Ccircle cx='14.4' cy='80.9' r='0.66' opacity='0.73'/%3E%3Ccircle cx='52.0' cy='10.3' r='0.93' opacity='0.37'/%3E%3Ccircle cx='25.0' cy='46.8' r='1.02' opacity='0.46'/%3E%3Ccircle cx='87.5' cy='20.4' r='1.06' opacity='0.56'/%3E%3Ccircle cx='66.4' cy='68.6' r='1.03' opacity='0.54'/%3E%3C/g%3E%3C/svg%3E");
+  /*
+   * 红碎用的「不规则碎块」贴图：三角/四边形，固定种子生成（见 README）。
+   * 它们只做 **mask**（白色=显示），颜色由背景那几层决定 ——
+   * 于是拖动卡面时颜色会在碎块之间流动，也就是「在光下变成彩色」。
+   *
+   * 四张，按「多少块」和「要不要光」分：
+   *   --foil-shards    30 块大碎块（5.5~13px）   常亮
+   *   --foil-shards-2  67 块细碎（2.6~7px）      常亮
+   *   --foil-shards-3  15 块大碎块               只有光靠近才显现
+   *   --foil-shards-4  33 块细碎                 只有光靠近才显现
+   * 合计大碎块 45、细碎 100，其中 48 块（33%）是「光一靠近才亮」的那一批。
+   * ⚠️ 「常亮」与「光照才现」必须分在**不同贴图**里：mask 是固定的，
+   * 唯一能让一批碎块平时完全看不见的办法，就是让它们只出现在
+   * 「背景本身在离开指针后是透明的」那几层上。
+   */
+  --foil-shards: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Cg fill='%23fff'%3E%3Cpolygon points='25.8,12.5 39.3,9.0 41.8,19.6 28.0,24.3'/%3E%3Cpolygon points='123.1,116.5 133.3,126.6 115.8,134.0'/%3E%3Cpolygon points='108.4,41.5 109.6,34.2 115.7,31.4 117.9,42.2'/%3E%3Cpolygon points='94.6,45.0 88.2,37.9 98.8,31.1 100.1,37.3'/%3E%3Cpolygon points='76.6,74.0 83.5,85.8 70.7,86.0'/%3E%3Cpolygon points='20.1,105.5 21.1,92.5 34.9,94.1 31.2,107.7'/%3E%3Cpolygon points='76.5,12.6 84.3,31.2 71.9,34.0'/%3E%3Cpolygon points='5.3,27.9 9.0,42.1 -3.5,35.7'/%3E%3Cpolygon points='3.0,47.3 5.9,33.2 12.1,36.7 13.6,46.9'/%3E%3Cpolygon points='9.2,96.7 12.1,86.3 19.1,87.7 20.4,96.6'/%3E%3Cpolygon points='27.2,11.3 32.8,-1.0 40.8,5.9'/%3E%3Cpolygon points='68.3,102.8 74.8,99.1 71.1,111.0'/%3E%3Cpolygon points='25.8,87.3 24.9,100.1 7.1,99.4 15.1,86.4'/%3E%3Cpolygon points='41.6,54.3 40.0,68.8 23.3,61.8'/%3E%3Cpolygon points='33.5,12.0 30.6,4.7 34.5,-2.8 40.9,2.0'/%3E%3Cpolygon points='82.6,9.9 73.2,9.1 80.4,2.0'/%3E%3Cpolygon points='117.4,10.1 107.6,18.7 104.8,10.1'/%3E%3Cpolygon points='38.4,6.2 44.5,1.2 47.8,8.6 40.9,12.4'/%3E%3Cpolygon points='68.8,106.8 64.6,99.7 72.7,98.7 74.1,104.4'/%3E%3Cpolygon points='-4.3,26.4 -0.1,5.1 14.3,12.4'/%3E%3Cpolygon points='65.0,14.4 48.4,2.6 68.3,-1.2'/%3E%3Cpolygon points='34.0,1.6 43.8,1.1 39.9,11.0'/%3E%3Cpolygon points='9.8,44.7 13.6,57.1 -3.5,51.3'/%3E%3Cpolygon points='22.2,93.8 16.7,112.5 12.1,91.9'/%3E%3Cpolygon points='93.7,108.5 90.3,121.0 79.2,112.2 84.6,106.9'/%3E%3Cpolygon points='71.4,-3.3 88.7,-4.0 82.6,10.7'/%3E%3Cpolygon points='36.5,51.0 39.0,43.5 49.0,43.0 49.0,56.3'/%3E%3Cpolygon points='22.7,85.1 31.6,62.2 35.0,86.2'/%3E%3Cpolygon points='124.9,94.1 125.4,103.4 111.6,104.7 110.2,90.1'/%3E%3Cpolygon points='82.2,14.1 76.2,32.0 62.1,21.4 66.7,7.9'/%3E%3C/g%3E%3C/svg%3E");
+  --foil-shards-2: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cg fill='%23fff'%3E%3Cpolygon points='61.4,93.2 61.8,97.0 55.4,98.1 57.3,92.4'/%3E%3Cpolygon points='10.0,8.0 7.9,5.2 11.4,3.2 13.0,4.9'/%3E%3Cpolygon points='27.9,78.0 35.5,73.9 32.6,81.2'/%3E%3Cpolygon points='56.6,31.1 62.3,30.6 60.2,35.0'/%3E%3Cpolygon points='14.8,93.3 3.5,91.1 13.6,82.3'/%3E%3Cpolygon points='38.5,56.0 45.9,54.5 41.2,63.0 35.6,63.5'/%3E%3Cpolygon points='59.6,22.4 62.6,22.6 61.7,25.6'/%3E%3Cpolygon points='2.0,86.4 8.8,82.4 9.3,91.2'/%3E%3Cpolygon points='75.3,46.7 79.6,37.9 83.8,46.2'/%3E%3Cpolygon points='55.2,60.8 59.4,59.5 58.4,62.4'/%3E%3Cpolygon points='51.6,7.5 54.9,7.2 55.4,11.3 52.6,10.3'/%3E%3Cpolygon points='45.6,26.6 47.7,22.9 50.7,27.7 47.9,29.9'/%3E%3Cpolygon points='27.4,44.7 22.5,38.0 28.6,33.2 31.5,37.2'/%3E%3Cpolygon points='34.4,41.7 26.5,38.0 28.7,32.3'/%3E%3Cpolygon points='19.2,55.2 21.8,49.9 23.7,54.6'/%3E%3Cpolygon points='42.8,95.5 44.4,88.5 49.5,92.7'/%3E%3Cpolygon points='79.2,57.1 80.5,66.3 74.6,63.6'/%3E%3Cpolygon points='46.5,78.3 38.8,72.0 50.6,66.4'/%3E%3Cpolygon points='33.7,82.4 35.4,78.8 37.7,81.0 37.2,83.7'/%3E%3Cpolygon points='49.1,-0.0 51.2,3.3 44.2,7.8 45.0,0.6'/%3E%3Cpolygon points='61.0,38.0 62.3,35.6 65.8,35.0 66.2,40.0'/%3E%3Cpolygon points='47.6,16.5 55.8,24.1 47.2,27.7 42.7,23.5'/%3E%3Cpolygon points='58.1,76.3 62.1,75.3 65.3,79.8 59.0,82.2'/%3E%3Cpolygon points='72.9,39.8 67.1,48.1 64.7,37.8'/%3E%3Cpolygon points='94.2,17.4 97.6,21.4 90.3,22.8'/%3E%3Cpolygon points='85.1,19.7 80.5,19.0 81.7,15.5'/%3E%3Cpolygon points='92.1,33.3 95.4,36.8 93.3,40.1 88.5,39.2'/%3E%3Cpolygon points='67.8,43.2 61.3,47.4 59.3,39.5 63.9,36.5'/%3E%3Cpolygon points='22.3,66.2 20.8,63.6 25.5,61.2 28.6,66.1'/%3E%3Cpolygon points='65.7,34.9 68.1,36.3 66.3,38.9'/%3E%3Cpolygon points='4.8,70.9 11.4,69.9 13.4,76.4 4.9,79.5'/%3E%3Cpolygon points='11.5,69.1 15.9,71.0 13.1,73.7'/%3E%3Cpolygon points='31.5,8.7 27.8,5.8 26.9,-3.0 31.6,0.5'/%3E%3Cpolygon points='61.1,58.7 64.4,59.9 62.0,64.3 60.0,62.5'/%3E%3Cpolygon points='14.9,53.0 15.8,59.6 10.7,58.2'/%3E%3Cpolygon points='23.1,33.8 25.8,43.1 15.3,44.3 13.8,36.1'/%3E%3Cpolygon points='55.0,89.5 51.5,89.5 53.0,83.9'/%3E%3Cpolygon points='89.6,19.0 92.8,19.6 88.7,23.8'/%3E%3Cpolygon points='48.3,6.6 45.4,11.5 40.1,8.3 41.8,4.2'/%3E%3Cpolygon points='30.1,68.1 36.6,67.6 34.7,72.8'/%3E%3Cpolygon points='25.6,2.3 24.0,7.2 12.7,7.4 14.8,-1.1'/%3E%3Cpolygon points='76.1,58.4 74.4,67.1 69.5,61.0'/%3E%3Cpolygon points='72.6,13.6 76.7,12.3 77.1,15.8'/%3E%3Cpolygon points='89.8,7.5 93.3,-2.8 101.5,5.7'/%3E%3Cpolygon points='60.7,17.2 67.9,10.5 68.5,21.1'/%3E%3Cpolygon points='86.0,69.7 97.3,68.1 93.6,79.0'/%3E%3Cpolygon points='61.6,75.4 56.9,75.7 56.8,71.0 61.6,71.1'/%3E%3Cpolygon points='42.5,54.3 35.3,55.3 31.3,48.5 38.9,47.6'/%3E%3Cpolygon points='46.6,49.7 43.8,51.5 42.5,47.7 44.2,46.8'/%3E%3Cpolygon points='7.9,64.2 4.5,57.3 13.6,52.8 15.4,63.4'/%3E%3Cpolygon points='50.8,25.8 57.2,28.5 50.1,34.2'/%3E%3Cpolygon points='44.6,46.0 50.6,43.5 52.7,51.4'/%3E%3Cpolygon points='95.1,23.9 90.6,17.1 98.8,14.2 99.7,19.1'/%3E%3Cpolygon points='8.6,44.1 1.9,40.0 9.0,37.3'/%3E%3Cpolygon points='93.9,7.4 87.7,10.0 80.2,5.1 90.2,-0.4'/%3E%3Cpolygon points='39.0,17.5 30.9,27.9 29.3,16.3'/%3E%3Cpolygon points='92.9,57.3 84.9,54.5 86.1,50.2'/%3E%3Cpolygon points='43.2,54.8 47.3,52.2 46.7,55.5'/%3E%3Cpolygon points='87.6,5.6 92.2,0.6 94.0,5.8 89.9,7.8'/%3E%3Cpolygon points='93.2,-2.2 92.1,2.6 88.9,-0.7'/%3E%3Cpolygon points='87.0,38.0 78.2,30.6 84.1,27.7 93.0,30.3'/%3E%3Cpolygon points='61.3,60.5 63.1,50.5 68.4,57.7'/%3E%3Cpolygon points='65.7,57.5 60.7,61.4 55.1,56.8'/%3E%3Cpolygon points='79.6,14.4 73.4,15.1 78.0,8.6'/%3E%3Cpolygon points='25.6,47.9 23.3,52.2 22.2,51.7 21.7,48.2'/%3E%3Cpolygon points='81.1,90.6 83.4,97.0 78.2,97.7'/%3E%3Cpolygon points='77.7,93.2 74.6,87.8 82.1,86.4'/%3E%3C/g%3E%3C/svg%3E");
+  /* 15 块大碎块：只有光靠近才显现 */
+  --foil-shards-3: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='128' height='128'%3E%3Cg fill='%23fff'%3E%3Cpolygon points='3.8,2.7 8.4,-5.8 13.5,3.6'/%3E%3Cpolygon points='52.5,108.7 44.2,118.2 31.2,115.0 42.2,104.7'/%3E%3Cpolygon points='80.2,56.8 70.0,46.4 85.3,42.3'/%3E%3Cpolygon points='79.3,14.2 85.3,9.2 86.0,20.8'/%3E%3Cpolygon points='58.4,69.7 71.3,63.6 67.8,73.4'/%3E%3Cpolygon points='82.4,74.5 66.7,78.8 64.4,56.9'/%3E%3Cpolygon points='11.5,14.7 14.9,-0.9 31.4,-1.9 31.3,14.6'/%3E%3Cpolygon points='101.5,37.6 93.9,52.2 81.6,45.5'/%3E%3Cpolygon points='69.2,93.9 69.6,86.0 80.6,89.8 75.8,93.9'/%3E%3Cpolygon points='53.8,47.1 69.2,54.2 56.7,63.3'/%3E%3Cpolygon points='-0.6,74.7 -1.4,62.7 7.9,68.1'/%3E%3Cpolygon points='78.3,3.6 66.8,6.6 71.2,-8.7'/%3E%3Cpolygon points='57.4,58.7 70.4,71.4 54.6,72.8'/%3E%3Cpolygon points='78.4,59.6 79.3,49.8 89.5,52.1 90.8,59.9'/%3E%3Cpolygon points='63.2,109.5 66.6,123.7 46.2,124.4 45.1,108.6'/%3E%3C/g%3E%3C/svg%3E");
+  /* 33 块细碎：只有光靠近才显现 */
+  --foil-shards-4: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96'%3E%3Cg fill='%23fff'%3E%3Cpolygon points='74.8,25.4 78.5,32.3 69.3,32.5'/%3E%3Cpolygon points='41.9,14.2 46.7,0.4 52.8,9.5'/%3E%3Cpolygon points='10.3,35.4 8.3,48.5 1.8,40.0'/%3E%3Cpolygon points='74.2,79.4 65.0,80.4 70.2,74.0'/%3E%3Cpolygon points='35.1,85.8 25.5,94.1 22.0,81.8'/%3E%3Cpolygon points='32.0,57.0 36.6,61.5 33.3,65.5 29.3,60.6'/%3E%3Cpolygon points='68.9,43.6 70.0,49.0 65.9,49.3 66.1,44.7'/%3E%3Cpolygon points='82.5,96.0 72.6,101.5 75.7,91.9'/%3E%3Cpolygon points='92.4,31.3 79.8,27.1 92.5,20.9'/%3E%3Cpolygon points='8.6,20.5 13.6,20.6 12.8,26.5 9.6,29.7'/%3E%3Cpolygon points='75.2,6.1 86.1,1.1 84.5,11.0'/%3E%3Cpolygon points='4.6,72.8 8.0,76.2 5.1,80.6 1.7,79.0'/%3E%3Cpolygon points='5.3,40.0 4.0,31.3 14.0,34.9'/%3E%3Cpolygon points='45.1,27.2 43.9,29.9 40.2,27.4 42.0,24.3'/%3E%3Cpolygon points='66.6,18.8 76.5,18.5 69.0,25.1'/%3E%3Cpolygon points='71.5,43.9 78.4,46.2 82.9,53.4 74.2,51.0'/%3E%3Cpolygon points='51.4,24.2 47.4,20.1 53.4,19.4'/%3E%3Cpolygon points='31.7,24.2 37.2,26.6 33.0,30.4'/%3E%3Cpolygon points='76.6,19.7 80.1,17.5 81.7,26.2'/%3E%3Cpolygon points='70.1,84.0 67.3,79.8 72.1,80.2'/%3E%3Cpolygon points='47.3,3.8 39.0,7.4 43.2,-0.7'/%3E%3Cpolygon points='62.8,12.6 70.0,12.4 66.0,23.7 58.1,19.3'/%3E%3Cpolygon points='41.9,37.9 45.1,39.8 42.2,43.6'/%3E%3Cpolygon points='95.5,73.9 93.4,65.1 101.0,66.0'/%3E%3Cpolygon points='40.9,52.9 42.1,49.1 44.2,53.3'/%3E%3Cpolygon points='64.8,78.0 67.6,84.8 60.6,86.0'/%3E%3Cpolygon points='29.6,55.8 20.8,51.1 26.7,46.6'/%3E%3Cpolygon points='64.0,43.6 73.3,39.3 72.7,51.0'/%3E%3Cpolygon points='17.8,3.7 21.7,-0.9 24.3,3.0 22.0,6.4'/%3E%3Cpolygon points='-0.5,78.4 4.8,72.3 12.6,74.1 5.4,83.5'/%3E%3Cpolygon points='34.5,29.4 38.8,27.0 39.9,29.3 35.9,33.7'/%3E%3Cpolygon points='87.5,18.7 76.7,15.2 86.7,9.7'/%3E%3Cpolygon points='46.9,50.8 43.6,56.2 40.6,49.8'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/*
+ * 大图里光要更明显一点：那里的动作就是「按住拖动看角度」，
+ * 太暗的话读者根本看不出闪 —— 这一条必须写在上面那个共享块**之后**
+ *（同一份变量在两个选择器上各有一份值时，后写的赢）。
+ */
+.card-dialog-card {
+  --foil-opacity: 0.55;
+}
+
+/* 光效层：盖在卡图上、不吃指针事件（点开大图的按钮在卡片外面） */
+.foil-shine,
+.foil-shards,
+.foil-glare,
+.foil-sparks {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  border-radius: inherit;
+  /* 重绘范围锁在这几层自己的盒子里：拖动时每帧都要重画它们，
+     不锁的话失效会往上冒到整张卡甚至整页 */
+  contain: paint;
+}
+
+.foil-shine,
+.foil-glare {
+  opacity: var(--foil-opacity);
+  transition: opacity 0.25s ease;
+}
+
+/* 指针在卡片上时提亮 —— 网格里的卡也能「一晃就亮」 */
+.card-foil:hover {
+  --foil-opacity: 0.9;
+}
+
+/* 闪点贴图：内联 SVG（CSP 的 img-src 允许 data:）。
+   手写的一小片随机点阵，比 repeating-gradient 更像"碎闪"。 */
+.foil-shine::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: var(--foil-glitter);
+  background-size: 90px 90px;
+  background-position: calc(((50% - var(--background-x)) * 1.4) + 50%)
+    calc(((50% - var(--background-y)) * 1.9) + 50%);
+  mix-blend-mode: hard-light;
+  opacity: 0.8;
+}
+
+/* 以指针为中心的亮度衰减：光打在哪里，哪里最亮 */
+.foil-shine::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(
+    farthest-corner circle at var(--pointer-x) var(--pointer-y),
+    hsla(0, 0%, 92%, 0.85) 0%,
+    hsla(0, 0%, 70%, 0.12) 28%,
+    hsla(0, 0%, 0%, 0.9) 92%
+  );
+  mix-blend-mode: luminosity;
+  filter: brightness(0.65) contrast(3.4);
+}
+
+/* 最上层的一道光晕（跟着指针走） */
+.foil-glare {
+  background-image: radial-gradient(
+    farthest-corner circle at var(--pointer-x) var(--pointer-y),
+    hsla(0, 0%, 100%, 0.75) 8%,
+    hsla(0, 0%, 100%, 0.45) 22%,
+    hsla(0, 0%, 0%, 0.45) 88%
+  );
+  mix-blend-mode: overlay;
+  z-index: 6;
+}
+
+/* --------------------------------------------------------------------------
+   平闪 / 全闪的**卡面**（卡名与边框规则在下面各自那一节里，不动）
+
+   ⚠️ 2026-09-18 按作者要求**把两档的卡面对调了**：
+     平闪 现在用的是原来全闪那一套（六色彩虹 + 锥形渐变、screen 混合、更亮的滤镜）
+     全闪 现在用的是原来平闪那一套（光膜 + 细金属条、overlay 混合）
+   边框（全闪的稀有度浮雕）与卡名颜色（平闪银灰 / 全闪金色）**保持原样**，
+   所以现在「全闪」的身份主要靠金名 + 浮雕边框，「平闪」靠整卡彩虹。
+   要换回去就把这两块的 background/filter 对调，别的都不用动。
+   -------------------------------------------------------------------------- */
+
+.card-foil-flat .foil-shine {
+  background-image:
+    repeating-linear-gradient(
+      108deg,
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6),
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6)
+    ),
+    conic-gradient(
+      from calc(var(--background-x) * 3.6deg) at var(--pointer-x) var(--pointer-y),
+      hsla(0, 0%, 100%, 0.35), hsla(0, 0%, 0%, 0.25), hsla(0, 0%, 100%, 0.35)
+    );
+  background-position:
+    calc(((50% - var(--background-x)) * 3.2) + 50%) calc(((50% - var(--background-y)) * 4.2) + 50%),
+    center center;
+  background-size: 320% 320%, cover;
+  background-blend-mode: screen;
+  filter: brightness(1.12) contrast(1.12) saturate(1.35);
+  mix-blend-mode: color-dodge;
+}
+
+.card-foil-flat .card-name,
+.card-dialog[data-finish='flat'] .dialog-title {
+  color: #c9ced6; /* 银灰 */
+  font-weight: 700;
+}
+
+/* --------------------------------------------------------------------------
+   全闪：按稀有度的浮雕边框 + 卡名金色（只有 SSR 及以上会抽到，判定在 draw.js）
+   -------------------------------------------------------------------------- */
+
+.card-foil-full {
+  border-color: var(--rarity-color, var(--accent));
+  box-shadow:
+    0 0 0 1px var(--rarity-color, var(--accent)),
+    0 0 14px -4px var(--rarity-color, var(--accent)),
+    var(--shadow);
+}
+
+.card-foil-full .foil-shine {
+  background-image:
+    repeating-linear-gradient(
+      110deg,
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6),
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6),
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6)
+    ),
+    repeating-linear-gradient(100deg, rgba(40, 40, 40, 1) 0 2px, rgba(190, 190, 190, 1) 2px 4px);
+  background-position:
+    calc(((50% - var(--background-x)) * 2.6) + 50%) calc(((50% - var(--background-y)) * 3.5) + 50%),
+    center center;
+  background-size: 400% 400%, cover;
+  background-blend-mode: overlay;
+  filter: brightness(1.06) contrast(1.05) saturate(1.15);
+  mix-blend-mode: color-dodge;
+}
+
+/* 浮雕边框：内侧一圈高光 + 一圈阴影，看着像压出来的一层 */
+.card-foil-full .card-face {
+  box-shadow:
+    inset 0 0 0 1px hsla(0, 0%, 100%, 0.5),
+    inset 0 2px 5px hsla(0, 0%, 0%, 0.45),
+    inset 0 -2px 5px hsla(0, 0%, 100%, 0.16),
+    inset 0 0 24px -6px var(--rarity-color, var(--accent));
+}
+
+.card-foil-full .card-name,
+.card-dialog[data-finish='full'] .dialog-title {
+  color: #ffd257; /* 金 */
+  font-weight: 700;
+  text-shadow: 0 1px 0 rgba(120, 80, 0, 0.8);
+}
+
+/* --------------------------------------------------------------------------
+   红碎：全卡爆闪 + 人物略有浮雕感 + 边框向外散红点，卡名红字暗红描边
+   （只有 UR 及以上会抽到）
+   -------------------------------------------------------------------------- */
+
+.card-foil-shatter {
+  border-color: var(--rarity-color, #e5484d);
+  box-shadow:
+    0 0 0 1px var(--rarity-color, #e5484d),
+    0 0 20px -3px rgba(229, 72, 77, 0.85),
+    0 0 34px -12px rgba(229, 72, 77, 0.7),
+    var(--shadow);
+}
+
+.card-foil-shatter .foil-shine {
+  background-image:
+    repeating-linear-gradient(
+      58deg,
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6),
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6)
+    ),
+    conic-gradient(
+      from calc(var(--background-y) * 4deg) at var(--pointer-x) var(--pointer-y),
+      hsla(0, 0%, 100%, 0.5), hsla(0, 0%, 0%, 0.3), hsla(0, 0%, 100%, 0.5)
+    );
+  background-position:
+    calc(((50% - var(--background-x)) * 4.2) + 50%) calc(((50% - var(--background-y)) * 5.4) + 50%),
+    center center;
+  background-size: 260% 260%, cover;
+  background-blend-mode: screen;
+  filter: brightness(1.2) contrast(1.25) saturate(1.5);
+  mix-blend-mode: color-dodge;
+}
+
+/* 人物略微浮雕：不动原图，只加一层很轻的对比与描边光 */
+.card-foil-shatter .card-img,
+.card-foil-shatter .card-dialog-img {
+  filter: contrast(1.06) saturate(1.06) drop-shadow(0 0 1px hsla(0, 0%, 100%, 0.45))
+    drop-shadow(0 1px 2px hsla(0, 0%, 0%, 0.45));
+}
+
+.card-foil-shatter .card-face {
+  box-shadow:
+    inset 0 0 0 1px hsla(0, 0%, 100%, 0.4),
+    inset 0 0 26px -4px rgba(229, 72, 77, 0.55);
+}
+
+/* --------------------------------------------------------------------------
+   红碎的碎块层：满卡撒一层不规则三角 / 四边形，在光下变成彩色
+   --------------------------------------------------------------------------
+   手法是**形状做 mask、颜色做背景**：
+     · mask 是固定的碎块贴图（白色=显示）
+     · 背景是随 --background-x/y 滑动的彩虹 —— 拖动时颜色在碎块之间流动，
+       也就是「在光下变成彩色」；碎块本身不跟着动，动的是它们身上的颜色
+   mask 层与背景层是**一一对应**的，所以六层各用不同的贴图 / 尺寸 / 方向：
+
+     ① 大碎块（30 块，150px 平铺）+ 斜向彩虹            常亮，跟着角度滑动
+     ② 细碎（67 块，78px 平铺）+ 锥形彩虹               常亮，跟着指针旋转
+     ③ 又一遍大碎块（与①对齐）+ 指针处的白色高光         常亮的那批被光照到更亮
+     ④ 细碎放大铺（190px 错位）+ 反方向彩虹              常亮，与前三层互相错动
+     ⑤ 大碎块·光启（15 块）+ 指针处的彩色光晕             **只有光靠近才显现**
+     ⑥ 细碎·光启（33 块，78px）+ 更小更亮的指针光晕        **只有光靠近才显现**
+
+   ⑤⑥ 的「光启」是这么实现的：那两层背景是**以指针为中心的径向渐变，最外圈
+   alpha=0** —— 指针不在附近时它们画出来就是透明的，于是那 48 块碎块**完全看不见**；
+   光一靠近，它们才在光晕里亮起来。这也是为什么「常亮」和「光启」必须分成
+   不同的贴图：mask 是固定的，只有让一批碎块**只**出现在这种背景层上，才能让它们
+   平时消失。（作者要求：大碎块 45、细碎 100，其中三分之一光一靠近才显现。）
+
+   想要更多碎块时**优先把贴图做密**（每层只画一次，加块数不花钱），
+   而不是无限加层 —— 每加一层就多一次整卡大小的 mask 绘制。
+   ========================================================================== */
+
+.foil-shards {
+  background-image:
+    repeating-linear-gradient(
+      105deg,
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6),
+      var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6)
+    ),
+    conic-gradient(
+      from calc(var(--background-x) * 4.2deg) at var(--pointer-x) var(--pointer-y),
+      var(--foil-5), var(--foil-4), var(--foil-3), var(--foil-2), var(--foil-1), var(--foil-6), var(--foil-5)
+    ),
+    radial-gradient(
+      farthest-corner circle at var(--pointer-x) var(--pointer-y),
+      hsla(0, 0%, 100%, 0.9) 0%,
+      hsla(0, 0%, 100%, 0.3) 16%,
+      hsla(0, 0%, 100%, 0) 42%
+    ),
+    repeating-linear-gradient(
+      132deg,
+      var(--foil-6), var(--foil-5), var(--foil-4), var(--foil-3), var(--foil-2), var(--foil-1),
+      var(--foil-6), var(--foil-5), var(--foil-4), var(--foil-3), var(--foil-2), var(--foil-1)
+    ),
+    /* ⑤ 光启 · 大碎块：白光核 + 一圈彩色，30% 之后完全透明 */
+    radial-gradient(
+      farthest-corner circle at var(--pointer-x) var(--pointer-y),
+      hsla(0, 0%, 100%, 0.95) 0%,
+      hsl(45, 100%, 72%) 4%,
+      hsl(320, 100%, 73%) 9%,
+      hsl(190, 100%, 74%) 14%,
+      hsla(265, 100%, 74%, 0.55) 20%,
+      hsla(265, 100%, 74%, 0) 30%
+    ),
+    /* ⑥ 光启 · 细碎：范围更小、更集中，像是只有光正下方那一片才炸开 */
+    radial-gradient(
+      farthest-corner circle at var(--pointer-x) var(--pointer-y),
+      hsla(0, 0%, 100%, 0.98) 0%,
+      hsl(58, 100%, 76%) 3%,
+      hsl(300, 100%, 76%) 7%,
+      hsl(176, 100%, 76%) 11%,
+      hsla(220, 100%, 76%, 0.5) 15%,
+      hsla(220, 100%, 76%, 0) 23%
+    );
+  background-size: 320% 320%, 240% 240%, cover, 280% 280%, cover, cover;
+  background-position:
+    calc(((50% - var(--background-x)) * 4.6) + 50%) calc(((50% - var(--background-y)) * 5.6) + 50%),
+    center center,
+    center center,
+    /* 第 ④ 层的位移**反着来**：两层彩虹朝相反方向滑，碎块看起来在互相错动 */
+    calc(((var(--background-x) - 50%) * 3.4) + 50%) calc(((var(--background-y) - 50%) * 4.4) + 50%),
+    center center,
+    center center;
+  -webkit-mask-image: var(--foil-shards), var(--foil-shards-2), var(--foil-shards), var(--foil-shards-2), var(--foil-shards-3), var(--foil-shards-4);
+  mask-image: var(--foil-shards), var(--foil-shards-2), var(--foil-shards), var(--foil-shards-2), var(--foil-shards-3), var(--foil-shards-4);
+  -webkit-mask-size: 150px 150px, 78px 78px, 150px 150px, 190px 190px, 150px 150px, 78px 78px;
+  mask-size: 150px 150px, 78px 78px, 150px 150px, 190px 190px, 150px 150px, 78px 78px;
+  -webkit-mask-position: 0 0, 13px 21px, 0 0, 41px 9px, 26px 7px, 0 0;
+  mask-position: 0 0, 13px 21px, 0 0, 41px 9px, 26px 7px, 0 0;
+  -webkit-mask-repeat: repeat;
+  mask-repeat: repeat;
+  /* color-dodge：底子越亮的地方越炸 —— 所以正是「光下的碎块最彩」 */
+  mix-blend-mode: color-dodge;
+  /* 拖动检视时 --foil-opacity 会升到 1，碎块跟着更亮一点 */
+  opacity: calc(0.5 + var(--foil-opacity, 0.42) * 0.9);
+  z-index: 5;
+}
+
+/* 再撒一层稀疏的大碎块，自己慢慢漂 —— 只动 transform，不重绘 */
+.foil-shards::before {
+  content: '';
+  position: absolute;
+  inset: -15%; /* 给漂移留余量（外面被 contain: paint 裁掉） */
+  background-image: repeating-linear-gradient(
+    62deg,
+    var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6),
+    var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6)
+  );
+  background-size: 260% 260%;
+  background-position: calc(((50% - var(--background-x)) * 5.4) + 50%)
+    calc(((50% - var(--background-y)) * 6.4) + 50%);
+  -webkit-mask-image: var(--foil-shards-2);
+  mask-image: var(--foil-shards-2);
+  -webkit-mask-size: 210px 210px;
+  mask-size: 210px 210px;
+  opacity: 0.6;
+  animation: foil-shards-drift 12s linear infinite;
+}
+
+@keyframes foil-shards-drift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-26px, 20px, 0);
+  }
+}
+
+/* 边框外散的红点：点阵用 mask 收在四周，再慢慢漂移 ——
+   卡本身是 overflow: hidden 的，所以粒子只能贴在边框内侧，
+   但它读起来仍然是「边框在往外散光点」。 */
+.foil-sparks {
+  background-image:
+    radial-gradient(circle, rgba(255, 96, 96, 0.95) 0 1.5px, rgba(255, 96, 96, 0) 2px),
+    radial-gradient(circle, rgba(255, 180, 160, 0.9) 0 1.1px, rgba(255, 180, 160, 0) 1.7px);
+  background-size: 22px 22px, 15px 15px;
+  /* ⚠️ 漂移用 **transform** 动画，不要动 background-position。
+     背景位移的动画每帧都要重画这一层，而且它是**永久循环**的 —— 一张红碎卡
+     留在页面上就等于每一帧都在烧主线程。transform 只走合成器，
+     不触发重绘（这一条和「拖动卡顿」是同一个病根：能交给合成器的就别交给画笔）。 */
+  animation: foil-sparks-drift 7s linear infinite;
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, transparent 40%, #000 74%);
+  mask-image: radial-gradient(circle at 50% 50%, transparent 40%, #000 74%);
+  opacity: 0.75;
+  z-index: 7;
+}
+
+@keyframes foil-sparks-drift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(22px, -22px, 0);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   红碎的卡名：**放大后的艺术字**（只有红碎用，平闪/全闪保持纯色 + 细描边）
+   --------------------------------------------------------------------------
+   三段：
+     ① 放大 + 加粗 + 字距 + 略微倾斜（像贴上去的标题）
+     ② 深色描边：用 -webkit-text-stroke（描边画在字面**之上**，所以能和下面的
+        渐变字面共存；text-shadow 不行 —— 它画在字面之上会把渐变盖掉）
+     ③ 立体感：filter: drop-shadow（作用在**画完之后**的结果上，所以也会描到渐变字）
+   渐变字面本身要 background-clip: text，放在 @supports 里：不支持时退回纯红字 +
+   八向暗红描边，也就是改动之前那一套，绝不会出现「红条 + 看不见的字」。
+   ========================================================================== */
+
+.card-foil-shatter .card-name,
+.card-dialog[data-finish='shatter'] .dialog-title {
+  color: #ff4d4d; /* 兜底：不支持渐变字面时就是纯红字 + 下面的描边 */
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  filter: drop-shadow(0 1px 0 #4d0000) drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55));
+  transform: skewX(-7deg) rotate(-1.2deg);
+  transform-origin: left center;
+  /* 描边交给 -webkit-text-stroke 之后，八向 text-shadow 会糊在字面上 */
+  text-shadow: none;
+}
+
+/*
+ * 放大 + 描边宽度**按字号分开写**：
+ * `-webkit-text-stroke` 是**居中**描边（一半压在字上），所以按比例给 ——
+ * 1.4px 对 16px 的中文字来说太粗（笔画会糊在一起），对 28px 的标题又太细。
+ */
+.card-foil-shatter .card-name {
+  font-size: 1.02rem;
+  line-height: 1.25;
+  padding: 1px 0; /* 给描边留一点余地，别被自身的 overflow: hidden 切掉 */
+  -webkit-text-stroke: 1.1px #6b0000;
+}
+
+.card-dialog[data-finish='shatter'] .dialog-title {
+  font-size: 1.75rem;
+  line-height: 1.25;
+  -webkit-text-stroke: 2px #6b0000;
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .card-foil-shatter .card-name,
+  .card-dialog[data-finish='shatter'] .dialog-title {
+    background-image: linear-gradient(
+      180deg,
+      #fff3ee 0%,
+      #ffc7ae 20%,
+      #ff5f5f 52%,
+      #d21010 76%,
+      #7c0000 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   大图里的闪卡
+   --------------------------------------------------------------------------
+   `.card-dialog-card` **不是** `.card`：它里面只有一张 `.card-dialog-img`，
+   没有 `.card-face`，所以上面那两处浮雕边框（按 .card-face 写的）在这里要补一份 ——
+   漏了的话大图里的全闪/红碎只有一层光，边框一点变化都没有。
+   ========================================================================== */
+
+.card-foil-full .card-dialog-img,
+.card-foil-shatter .card-dialog-img {
+  border-color: var(--rarity-color, var(--accent));
+}
+
+.card-foil-full .card-dialog-img {
+  box-shadow:
+    inset 0 0 0 1px hsla(0, 0%, 100%, 0.5),
+    inset 0 2px 5px hsla(0, 0%, 0%, 0.45),
+    0 0 0 1px var(--rarity-color, var(--accent)),
+    0 0 16px -4px var(--rarity-color, var(--accent));
+}
+
+.card-foil-shatter .card-dialog-img {
+  box-shadow:
+    inset 0 0 0 1px hsla(0, 0%, 100%, 0.4),
+    0 0 0 1px var(--rarity-color, #e5484d),
+    0 0 22px -4px rgba(229, 72, 77, 0.85);
+}
+
+/* --------------------------------------------------------------------------
+   检视：拖动卡面看不同角度（大图里用）
+   --------------------------------------------------------------------------
+   角度与光照位置由 page.js 用 CSSOM 写进 --tilt-x / --tilt-y / --pointer-*，
+   这里只负责把它们变成 transform。 */
+
+.card-inspect {
+  touch-action: none;
+  cursor: grab;
+  /* 检视是「按住拖动」的手势，所以这一块里不许有原生拖拽、也不许选中文字：
+     浏览器的图片拖拽会直接抢走 pointermove（表现成「拖出来一张图」），
+     而拖过文字时的选区会打断后续的移动事件。 */
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transform: perspective(900px) rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+  transition: transform 0.08s ease-out, box-shadow 0.2s ease;
+}
+
+.card-inspect img {
+  -webkit-user-drag: none;
+  /* 触屏上长按图片会弹「存储图像 / 拷贝」的系统菜单，同样会打断检视手势 */
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 悬停时**也要**保住这个 transform —— `.card:hover` 里的 translateY 会把它顶掉，
+   两者选择器权重相同，靠「后写的赢」不够稳，这里显式写一条。 */
+.card.card-inspect:hover {
+  transform: perspective(900px) rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+}
+
+/*
+ * 拖动中（`.is-inspecting` 由 page.js 在 pointerdown 时打上）。
+ *
+ * 三条都是为了「拖起来不卡」：
+ *   1. **关掉过渡** —— 每帧都在写新值，过渡只会让画面慢半拍，还让合成器在帧与帧
+ *      之间一直跑动画
+ *   2. **提升为独立合成层**（will-change + translateZ(0)）—— 光效层带
+ *      mix-blend-mode / filter / mask，重绘很贵；提升之后浏览器只需重新合成，
+ *      不用每帧重画整棵子树
+ *   3. 悬停那一条也要一起覆盖：拖动时鼠标一定在卡上，`.card.card-inspect:hover`
+ *      权重比这里高，不写就会把提升和「关过渡」一起顶掉
+ */
+.card-inspect.is-inspecting,
+.card.card-inspect.is-inspecting:hover {
+  transition: none;
+  will-change: transform;
+  transform: perspective(900px) rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg)) translateZ(0);
+}
+
+.card-inspect:active {
+  cursor: grabbing;
+}
+
+/* 减少动态效果：不漂移粒子与碎块，也不做过渡 */
+@media (prefers-reduced-motion: reduce) {
+  .foil-sparks,
+  .foil-shards::before {
+    animation: none;
+  }
+  .card-inspect,
+  .card-inspect:hover {
+    transition: none;
+  }
+}
+

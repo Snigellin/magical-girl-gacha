@@ -298,6 +298,112 @@
   }
 
   // -------------------------------------------------------------------------
+  // 特殊工艺（闪卡）
+  // -------------------------------------------------------------------------
+  //
+  // 只改**视觉效果**，卡图不动。三档由低到高：平闪 / 全闪 / 红碎，
+  // 每档都有概率与最低稀有度门槛（全闪要 SSR+、红碎要 UR+）。
+  //
+  // 判定是**一掷定档**：先看红碎、再看全闪、最后平闪。某一档因为稀有度门槛
+  // 不适用时，它的概率**不会**并到下一档 —— 低档卡就是拿不到高档工艺。
+
+  /**
+   * 工艺定义。**与 lib/data.js 的 FOIL_KINDS 必须逐字一致**（id、顺序、label、
+   * 最低稀有度）—— 服务端要它做归一化，浏览器要它做判定与显示。
+   * 两份拷贝是无奈之举（服务端与浏览器共用的只有这个纯逻辑模块，而 lib/data.js
+   * 是 ESM、不能被浏览器直接加载），所以 test-plugin.mjs 里有一条断言把两边钉住。
+   */
+  var FOIL_KINDS = [
+    { id: 'flat', label: '平闪', minRarity: '' },
+    { id: 'full', label: '全闪', minRarity: 'SSR' },
+    { id: 'shatter', label: '红碎', minRarity: 'UR' },
+  ]
+  var FOIL_IDS = FOIL_KINDS.map(function (f) {
+    return f.id
+  })
+
+  /** 档位 id -> rank（不在表里的返回 -1） */
+  function rankOf(data, rarityId) {
+    var list = (data && data.rarities) || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === rarityId) return Number(list[i].rank || 0)
+    }
+    return -1
+  }
+
+  /**
+   * 这门工艺能不能出现在这个档位上。
+   *
+   * 配置里的最低档位 id **必须存在于档位表**里；写了个不存在的 id 时这门工艺
+   * 直接出不来（宁可不给，也不要把稀有工艺放给所有卡），并在 `issues()` 里点名。
+   */
+  function foilAllowed(data, kindId, rarityId) {
+    var kind = null
+    for (var i = 0; i < FOIL_KINDS.length; i++) {
+      if (FOIL_KINDS[i].id === kindId) kind = FOIL_KINDS[i]
+    }
+    if (!kind) return false
+    var cfg = (data && data.settings && data.settings.foils) || {}
+    var min = String((cfg.minRarity && cfg.minRarity[kindId]) || kind.minRarity || '')
+    if (!min) return true
+    var need = rankOf(data, min)
+    if (need < 0) return false
+    var mine = rankOf(data, rarityId)
+    return mine >= 0 && mine >= need
+  }
+
+  /**
+   * 这一张抽出什么工艺（`''` = 普通）。
+   *
+   * 概率从 `settings.foils.rates` 读（百分数），门槛从 `settings.foils.minRarity` 读；
+   * 关掉 `settings.foils.enabled` 就永远返回普通。
+   *
+   * ⚠️ 判定顺序是**从高到低**：红碎 -> 全闪 -> 平闪。这样每一档的实测概率
+   * 就等于配置里那个数（0.5% / 5% / 20%），而不是「叠加上去」。
+   */
+  function foilRoll(data, rarityId, rng) {
+    var cfg = (data && data.settings && data.settings.foils) || {}
+    if (cfg.enabled === false) return ''
+    var rates = cfg.rates || {}
+    var pShatter = foilAllowed(data, 'shatter', rarityId) ? Number(rates.shatter || 0) : 0
+    var pFull = foilAllowed(data, 'full', rarityId) ? Number(rates.full || 0) : 0
+    var pFlat = foilAllowed(data, 'flat', rarityId) ? Number(rates.flat || 0) : 0
+    if (!(pShatter > 0) && !(pFull > 0) && !(pFlat > 0)) return ''
+    var r = rng() * 100
+    if (pShatter > 0 && r < pShatter) return 'shatter'
+    if (pFull > 0 && r < pShatter + pFull) return 'full'
+    if (pFlat > 0 && r < pShatter + pFull + pFlat) return 'flat'
+    return ''
+  }
+
+  /**
+   * 抽完之后玩家的「工艺拥有表」变成什么（纯函数，不改入参）。
+   *
+   * 一张卡可以同时拥有多种工艺（先抽到平闪、后来又抽到全闪）——
+   * 图鉴里就是在这些之间切换。数组**按档次从小到大**排，界面取最后一个就是最好的。
+   */
+  function foilsAfter(current, results) {
+    var out = {}
+    for (var k in current || {}) {
+      if (Object.prototype.hasOwnProperty.call(current, k) && Array.isArray(current[k])) {
+        out[k] = current[k].slice()
+      }
+    }
+    for (var i = 0; i < results.length; i++) {
+      var one = results[i]
+      var fin = one && one.finish ? String(one.finish) : ''
+      if (!fin || FOIL_IDS.indexOf(fin) < 0 || !one.card) continue
+      var id = one.card.id
+      var list = out[id] || (out[id] = [])
+      if (list.indexOf(fin) < 0) list.push(fin)
+      list.sort(function (a, b) {
+        return FOIL_IDS.indexOf(a) - FOIL_IDS.indexOf(b)
+      })
+    }
+    return out
+  }
+
+  // -------------------------------------------------------------------------
   // 核心
   // -------------------------------------------------------------------------
 
@@ -432,7 +538,10 @@
     var card = idx.byId[pickId]
     if (!card) return { ok: false, error: '卡牌 ' + pickId + ' 在名册里找不到（数据不一致）' }
 
-    return { ok: true, card: card, rarityId: rarityId, forced: forcedKind }
+    // 特殊工艺：每一张都有概率以闪卡的形式被抽出（与卡图无关，只影响显示）
+    var finish = foilRoll(data, rarityId, rng)
+
+    return { ok: true, card: card, rarityId: rarityId, forced: forcedKind, finish: finish }
   }
 
   /**
@@ -607,6 +716,12 @@
     spPityActive: spPityActive,
     spPityAfter: spPityAfter,
     spExclusions: spExclusions,
+    // 特殊工艺（闪卡）
+    FOIL_KINDS: FOIL_KINDS,
+    FOIL_IDS: FOIL_IDS,
+    foilAllowed: foilAllowed,
+    foilRoll: foilRoll,
+    foilsAfter: foilsAfter,
   }
 
   root.Gacha = api

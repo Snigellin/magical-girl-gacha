@@ -310,6 +310,151 @@ body {
   border-color: var(--accent);
 }
 
+/* --------------------------------------------------------------------------
+   特殊工艺（闪卡）的角标与切换胶囊
+   --------------------------------------------------------------------------
+   位置与光效在 cards.css，这里只放「文字标签」这一层。三种工艺各自一个颜色，
+   和卡名颜色对应（银灰 / 金 / 红）。 */
+.badge-foil {
+  position: absolute;
+  left: -2px;
+  top: 8px;
+  z-index: 7;
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: rgba(10, 6, 20, 0.72);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.badge-foil-flat {
+  color: #c9ced6;
+}
+
+.badge-foil-full {
+  color: #ffd257;
+}
+
+.badge-foil-shatter {
+  color: #ff4d4d;
+}
+
+/* 抽卡记录里的工艺标签：inline（不是浮在卡片上），用同三套颜色 */
+.badge-foil-hist {
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+/* 抽到闪卡的结果格子：给边框一点颜色呼应，但不抢卡面本身的效果 */
+.result-foil .card {
+  border-color: currentColor;
+}
+
+/* 工艺筛选条（图鉴工具栏下面一行） */
+.foil-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.9rem;
+}
+
+.foil-filter-key {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+/* 工艺胶囊：筛选条与大图里的切换按钮共用 */
+.foil-chip {
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.22rem 0.6rem;
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.foil-chip:hover {
+  border-color: var(--accent);
+}
+
+.foil-chip.is-on {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--accent-strong);
+}
+
+/* 各自的颜色（和卡名一致）：未选中时也认得出是哪一种工艺 */
+.foil-chip-flat.is-on {
+  border-color: #c9ced6;
+  background: rgba(201, 206, 214, 0.16);
+  color: #c9ced6;
+}
+
+.foil-chip-full.is-on {
+  border-color: #ffd257;
+  background: rgba(255, 210, 87, 0.16);
+  color: #b8860b;
+}
+
+.foil-chip-shatter.is-on {
+  border-color: #ff4d4d;
+  background: rgba(255, 77, 77, 0.16);
+  color: #c62828;
+}
+
+.foil-chip-count {
+  font-size: 0.7rem;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 一种工艺都没拥有时的说明（大图里） */
+.card-dialog-foil-hint {
+  font-size: 0.76rem;
+  color: var(--muted);
+  max-width: 24rem;
+}
+
+/* 抽卡页上那行特殊工艺说明（概率 + 门槛） */
+.foil-rate-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.foil-rate-key {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.foil-rate-note {
+  opacity: 0.85;
+}
+
 .result-summary,
 .hist-summary {
   display: flex;
@@ -1027,6 +1172,27 @@ textarea {
   backdrop-filter: blur(2px);
 }
 
+/*
+ * 拖动检视时**临时关掉整屏的背景模糊**。
+ *
+ * 模层的 backdrop-filter 是整块视口大小的一层，弹层里任何重绘都会让它重新模糊
+ * 一遍整个页面（背后还是密密麻麻的图鉴卡片）。卡片每帧都在倾斜，于是每帧都重算 ——
+ * 这是「按住拖一下整页卡住」里最贵的那一步。
+ * 拖动只持续几秒，而模糊在弹层遮罩下面本来就看不太出来，所以直接让路。
+ *
+ * 用 `:has()` 选中「弹层里有正在拖的卡」这个状态；不支持 `:has()` 的浏览器
+ * 会整条丢掉这条规则，也就是退回原来的行为（只是可能有点卡），不会变丑。
+ */
+.card-dialog:has(.is-inspecting)::backdrop {
+  backdrop-filter: none;
+}
+
+/* 顶栏的毛玻璃同理：它在弹层遮罩下面，本来就被压暗了，
+   但浏览器仍要维护一整条全宽的背景模糊 —— 弹层开着时它是纯浪费。 */
+body:has(dialog[open]) .bar {
+  backdrop-filter: none;
+}
+
 .dialog-form {
   display: flex;
   flex-direction: column;
@@ -1414,6 +1580,26 @@ textarea {
   align-items: center;
   justify-content: center;
   width: 100%;
+  /* 倾斜时不要被裁掉边角 */
+  padding: 0.5rem 0;
+}
+
+/* 检视容器：拖动它换角度。位置变量由 page.js 用 CSSOM 写（CSP 禁内联 style）
+   ⚠️ 闪卡那套变量（--pointer-* / --background-* / --foil-1..6 / --foil-glitter）
+   定义在 cards.css 的共享块里（`.card, .card-dialog-card`）—— **不要在这里再抄一份**：
+   抄一份就意味着改配色时要改两个地方，而不改的那一份会静默地继续用旧色。 */
+.card-dialog-card {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  border-radius: 10px;
+  /* 光效层是矩形的伪元素，要裁到圆角里，否则四个角会露出直角的闪光 */
+  overflow: hidden;
+}
+
+/* 检视时提亮（拖动 = 在换角度，光要更明显才看得出「闪」） */
+.card-dialog-card.is-inspecting {
+  --foil-opacity: 1;
 }
 
 .card-dialog-img {
@@ -1425,6 +1611,25 @@ textarea {
   border-radius: 10px;
   background: var(--panel-2);
   object-fit: contain;
+}
+
+/* 工艺切换：一排小胶囊（普通 / 平闪 / 全闪 / 红碎） */
+.card-dialog-foils {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.card-dialog-foils:empty {
+  display: none;
+}
+
+/* 检视提示：只有能拖的卡才显示 */
+.card-dialog-inspect {
+  color: var(--muted);
+  font-size: 0.76rem;
 }
 
 /* 没有卡面图 ≠ 大图读不到。前者是「还没配」，后者会在图鉴格子里报错。 */

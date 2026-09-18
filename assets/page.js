@@ -88,6 +88,8 @@
     anim: 'gacha.anim.v1',
     /** 图鉴里收起的系列组（也是读者偏好） */
     collapsed: 'gacha.collapsed.v1',
+    /** 图鉴里每张卡选中的闪卡工艺（读者偏好：切换过就记住） */
+    foilView: 'gacha.foilview.v1',
     /** 选中的卡池（读者偏好：刷新之后要还在，否则「我选了群友池」会白选） */
     pool: 'gacha.pool.v1',
   }
@@ -112,6 +114,12 @@
     collQuery: '',
     /** 图鉴里收起的系列组 { 'series:女仆系列': true } */
     collapsed: {},
+    /** 图鉴里每张卡选中的闪卡工艺 { 卡牌id: 'full' }（读者偏好） */
+    foilView: {},
+    /** 图鉴的工艺筛选：'' = 全部，否则只看拥有这门工艺的卡 */
+    foilFilter: '',
+    /** 在大图里换过工艺、图鉴格子还没跟上（关弹层时要重画一次） */
+    foilViewDirty: false,
     /** 大图弹层当前显示的卡 id */
     cardOpen: '',
     els: {},
@@ -376,6 +384,8 @@
         duplicates: 0,
         // 与服务端同名：卡池 id -> true（SP 保底开关，见 draw.js 的 spPityAfter）
         spPity: {},
+        // 与服务端同名：卡牌 id -> 拥有的特殊工艺数组（见 draw.js 的 foilsAfter）
+        foils: {},
       }
     }
     // 旧版本用过 collection 这个名字 —— 迁移过来，别让老玩家的收集进度凭空消失
@@ -393,6 +403,23 @@
       var kept = {}
       for (var pk in s.spPity) if (s.spPity[pk]) kept[pk] = true
       s.spPity = kept
+    }
+    // 工艺拥有表：只留认识的工艺 id，去重（拼错的留着不会报错，
+    // 只会让「这张卡到底有没有闪」永远判错）
+    if (!s.foils || typeof s.foils !== 'object' || Array.isArray(s.foils)) s.foils = {}
+    else {
+      var keptF = {}
+      for (var fk in s.foils) {
+        var list = s.foils[fk]
+        if (!Array.isArray(list)) continue
+        var ids = []
+        for (var li = 0; li < list.length; li++) {
+          var id = foilId(list[li])
+          if (id && ids.indexOf(id) < 0) ids.push(id)
+        }
+        if (ids.length) keptF[fk] = ids
+      }
+      s.foils = keptF
     }
     return s
   }
@@ -486,6 +513,7 @@
     if (patch.sinceTop !== undefined) p.sinceTop = Number(patch.sinceTop || 0)
     if (patch.history) p.history = patch.history
     if (patch.spPity) p.spPity = patch.spPity
+    if (patch.foils) p.foils = patch.foils
   }
 
   /**
@@ -508,6 +536,7 @@
         duplicates: Number(p.duplicates || 0),
         sinceTop: Number(p.sinceTop || 0),
         spPity: p.spPity || {},
+        foils: p.foils || {},
       }),
     })
   }
@@ -1289,7 +1318,15 @@
    */
   function cardFigure(card, opts) {
     opts = opts || {}
-    var box = el('div', { class: 'card' + (opts.size ? ' card-' + opts.size : '') })
+    var finish = foilId(opts.finish)
+    var box = el('div', {
+      class:
+        'card' +
+        (opts.size ? ' card-' + opts.size : '') +
+        (finish ? ' card-foil card-foil-' + finish : '') +
+        (opts.inspect ? ' card-inspect' : ''),
+    })
+    if (finish) box.setAttribute('data-finish', finish)
 
     var r = rarityById(card.rarity)
     if (r && r.color) box.style.setProperty('--rarity-color', r.color)
@@ -1304,7 +1341,11 @@
     )
 
     if (card.imageUrl) {
-      var img = el('img', { class: 'card-img', src: card.imageUrl, alt: card.name || '卡面', loading: 'lazy' })
+      // ⚠️ draggable="false"：浏览器默认把 <img> 当成可拖拽对象，一按住拖动就会
+      // 开始**原生图片拖拽**（半透明残影 + 禁止光标），我们的 pointermove 也就断了。
+      // 大图里的「按住拖动 = 换角度看闪卡」正是被这件事抢走的。
+      // 属性值必须是字符串 'false' —— el() 会把布尔 false 当成「不设置」跳过。
+      var img = el('img', { class: 'card-img', src: card.imageUrl, alt: card.name || '卡面', loading: 'lazy', draggable: 'false' })
       img.addEventListener('error', function () {
         // 绝不静默：图读不到要把原因和可点开的地址挂在卡上
         img.hidden = true
@@ -1329,6 +1370,16 @@
             : null,
         ])
       )
+    }
+
+    // 特殊工艺的光效层：纯装饰，卡图**不动**。
+    // 位置由 --pointer-x/y 等变量驱动（CSP 下不能用内联 style，所以走 CSSOM/类名）。
+    if (finish) {
+      face.appendChild(el('span', { class: 'foil-shine', 'aria-hidden': 'true' }))
+      // 红碎多一层「不规则碎块」（在光下变彩色的那些三角/四边形）
+      if (finish === 'shatter') face.appendChild(el('span', { class: 'foil-shards', 'aria-hidden': 'true' }))
+      face.appendChild(el('span', { class: 'foil-glare', 'aria-hidden': 'true' }))
+      if (finish === 'shatter') face.appendChild(el('span', { class: 'foil-sparks', 'aria-hidden': 'true' }))
     }
     box.appendChild(face)
 
@@ -1470,6 +1521,14 @@
     if (spAfter.active) local.spPity[pool.id] = true
     else delete local.spPity[pool.id]
 
+    // 特殊工艺：把这一轮抽到的工艺记进「已拥有」。合并规则也在 draw.js 里
+    //（foilsAfter 是纯函数），服务端同步时用的是同一份。
+    var G2 = G()
+    local.foils =
+      G2 && G2.foilsAfter
+        ? G2.foilsAfter(local.foils || {}, result.results)
+        : Object.assign({}, local.foils || {})
+
     var at = Date.now()
     var rows = settle.perCard.map(function (pc, idx) {
       return {
@@ -1480,6 +1539,8 @@
         duplicate: pc.duplicate,
         shards: pc.shards,
         guaranteed: !!(result.results[idx] && result.results[idx].guaranteed),
+        // 这一张的工艺（空串 = 普通）—— 记录页要能标出「这张是闪的」
+        finish: foilId(result.results[idx] && result.results[idx].finish),
       }
     })
     for (var j = rows.length - 1; j >= 0; j--) local.history.unshift(rows[j])
@@ -1496,6 +1557,7 @@
       sinceTop: local.sinceTop,
       history: local.history,
       spPity: local.spPity,
+      foils: local.foils,
     })
 
     // --- 展示用的本轮结果 ------------------------------------------------
@@ -1513,6 +1575,8 @@
           isNew: !pc.duplicate,
           duplicate: !!pc.duplicate,
           shards: Number(pc.shards || 0),
+          // 这一张的工艺（空串 = 普通）：结果格子与动画都要按它来显示
+          finish: foilId(item.finish),
         }
       }),
     }
@@ -1520,6 +1584,8 @@
       poolId: pool.id,
       at: state.last.at,
       ids: state.last.results.map(function (r) { return r.card.id }),
+      // 刷新后还要能还原「哪张是闪的」——只存 id 不够
+      finishes: state.last.results.map(function (r) { return r.finish || '' }),
     })
 
     state.sinceTop = sinceTop
@@ -1536,6 +1602,14 @@
         : count > 1
         ? '十连完成 · 全部是新卡！'
         : '抽到新卡 ' + result.results[0].card.name
+
+    // 抽到闪卡要说一句 —— 否则读者只会觉得「这张图有点不一样」而错过
+    var foilHit = null
+    for (var fi = 0; fi < result.results.length; fi++) {
+      var fid = foilId(result.results[fi].finish)
+      if (fid) foilHit = fid
+    }
+    if (foilHit) toastText += ' · 特殊工艺：' + foilLabel(foilHit)
 
     /**
      * 动画放完（或没开动画时立刻）才渲染结果视图。
@@ -1555,7 +1629,8 @@
           rarityId: r.rarityId,
           name: r.card && r.card.name,
           // 复用 cardFigure：动画里翻开的正面就是真正的卡（含占位与「读不到图」提示）
-          faceEl: cardFigure(r.card, { size: 'lg' }),
+          // 闪卡的工艺也一起带过去 —— 动画里那张就该是闪的
+          faceEl: cardFigure(r.card, { size: 'lg', finish: r.finish }),
         }
       })
       revealMod
@@ -1584,7 +1659,7 @@
 
     // --- 同步到服务端（仅动态站 + 已解锁） --------------------------------
     // 服务端会用同一份规则**重新结算一遍**（它有自己的 owned 状态），
-    // 所以这里只送卡牌 id，不送碎片数 —— 让服务端算，避免两边对不上。
+    // 所以这里只送卡牌 id 与工艺，不送碎片数 —— 让服务端算，避免两边对不上。
     if (BACKEND && state.unlocked) {
       request('/draw/sync', {
         method: 'POST',
@@ -1595,7 +1670,7 @@
           // SP 保底开关按池子记，服务端没有别的来源 —— 整张表送上去
           spPity: local.spPity,
           results: result.results.map(function (item) {
-            return { cardId: item.card.id }
+            return { cardId: item.card.id, finish: foilId(item.finish) }
           }),
         },
       })
@@ -1612,6 +1687,7 @@
             l2.owned = res.player.owned || l2.owned
             l2.shards = res.player.shards || l2.shards
             l2.duplicates = Number(res.player.duplicates || 0)
+            if (res.player.foils) l2.foils = res.player.foils
             saveLocal(l2)
             render()
           }
@@ -1766,6 +1842,10 @@
           ])
         }))
       )
+      // 特殊工艺的概率也要写出来：页面上多了一整套概率，不写清楚的话
+      // 读者只会看到「有的卡在发光」，然后怀疑是不是显示坏了
+      var foilLine = foilRateLine()
+      if (foilLine) wrap.appendChild(foilLine)
     }
 
     // 动画开关：读者的偏好，存在他自己的浏览器里
@@ -1803,7 +1883,18 @@
           var rk = rev ? rev.rankOf(item.rarityId, rarityList()) : 1
           holder.style.setProperty('--glow-step', String(Math.max(1, rk - 1)))
         }
-        holder.appendChild(cardFigure(item.card, { size: 'lg' }))
+        holder.appendChild(cardFigure(item.card, { size: 'lg', finish: item.finish }))
+        // 这张抽到的是闪卡 —— 必须标出来，否则读者不知道自己抽到了特殊工艺
+        if (item.finish) {
+          holder.appendChild(
+            el('div', {
+              class: 'badge-foil badge-foil-' + item.finish,
+              text: foilLabel(item.finish),
+              title: '这张是「' + foilLabel(item.finish) + '」特殊工艺',
+            })
+          )
+          holder.classList.add('result-foil')
+        }
         if (item.isNew) {
           holder.appendChild(el('div', { class: 'badge-new', text: 'NEW' }))
         } else if (item.duplicate) {
@@ -2015,6 +2106,142 @@
   }
 
   /**
+   * 「这张卡就按普通版显示」在 localStorage 里的哨兵值。
+   *
+   * 为什么不能直接把键删掉当「普通」：「没选过」的默认是**最好的那一种**，
+   * 两者必须区分开，否则读者在大图里点了「普通」之后一关弹层又变回闪的。
+   * 用一对下划线包住，避免和以后可能出现的工艺 id 撞名。
+   */
+  var PLAIN_PICK = '__plain__'
+
+  /**
+   * 特殊工艺（闪卡）的元数据 —— 定义在 page/draw.js 里（判定与显示共用一份）。
+   * 拿不到就当没有这门功能：页面照常跑，只是不显示任何闪卡效果。
+   */
+  function foilKinds() {
+    var g = G()
+    return (g && g.FOIL_KINDS) || []
+  }
+
+  /** 校验一个工艺 id（不认识的返回 ''，绝不把未知值带进 DOM 类名） */
+  function foilId(x) {
+    var s = String(x == null ? '' : x)
+    if (!s) return ''
+    var kinds = foilKinds()
+    for (var i = 0; i < kinds.length; i++) if (kinds[i].id === s) return s
+    return ''
+  }
+
+  function foilLabel(id) {
+    var kinds = foilKinds()
+    for (var i = 0; i < kinds.length; i++) if (kinds[i].id === id) return kinds[i].label || kinds[i].id
+    return id
+  }
+
+  /** 玩家拥有的工艺表：卡牌 id -> [工艺 id]（服务端与本地存储同名同形） */
+  function foils() {
+    var p = player()
+    var m = (p && p.foils) || {}
+    return typeof m === 'object' && m ? m : {}
+  }
+
+  /**
+   * 这张卡拥有哪些工艺（按档次从小到大，界面取最后一个就是最好的）。
+   *
+   * ⚠️ 未拥有的卡一律返回空：用户要求「未拥有的闪卡在图鉴里不显示效果」。
+   * 「拥有张数」与「工艺表」是**两份**数据（同步、后台改写都可能只动其中一份），
+   * 所以这条规则钉在这里，而不是指望两份数据永远一致 —— 图鉴格子、角标、
+   * 筛选、大图切换四处都走这个函数，规则就只有一份。
+   */
+  function ownedFoils(cardId) {
+    if (!(Number(collection()[cardId] || 0) > 0)) return []
+    var list = foils()[cardId]
+    if (!Array.isArray(list)) return []
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var id = foilId(list[i])
+      if (id && out.indexOf(id) < 0) out.push(id)
+    }
+    // 按 FOIL_KINDS 的顺序排（定义里就是从低到高）
+    var kinds = foilKinds()
+    out.sort(function (a, b) {
+      var ia = -1
+      var ib = -1
+      for (var k = 0; k < kinds.length; k++) {
+        if (kinds[k].id === a) ia = k
+        if (kinds[k].id === b) ib = k
+      }
+      return ia - ib
+    })
+    return out
+  }
+
+  /**
+   * 抽卡页上那行「特殊工艺」说明（概率 + 门槛）。
+   *
+   * 只在真的开着一门概率 > 0 的工艺时才渲染 —— 全关掉时留着这一行
+   * 只会让人以为「有这个功能但我抽不到」。门槛写了个档位表里没有的档位时，
+   * 这里照实把它写出来（判定那边也是「这一档出不来」）。
+   */
+  function foilRateLine() {
+    var cfg = (state.data && state.data.settings && state.data.settings.foils) || {}
+    if (cfg.enabled === false) return null
+    var rates = cfg.rates || {}
+    var kinds = foilKinds()
+    var parts = []
+    for (var i = 0; i < kinds.length; i++) {
+      var k = kinds[i]
+      var p = Number(rates[k.id] || 0)
+      if (!(p > 0)) continue
+      var min = String((cfg.minRarity && cfg.minRarity[k.id]) || k.minRarity || '')
+      var r = min ? rarityById(min) : null
+      var where = min ? (r ? r.label || r.id : min) + ' 及以上' : '所有档位'
+      // ⚠️ 配置里是**百分数**（20 = 20%），而 fmtRate 收的是分数（0.2）——
+      // 直接传 20 会显示成「2000%」（出率表那条路径给的就是分数）。
+      parts.push((k.label || k.id) + ' ' + fmtRate(p / 100) + '（' + where + '）')
+    }
+    if (!parts.length) return null
+    return el('div', { class: 'foil-rate-line' }, [
+      el('span', { class: 'foil-rate-key', text: '特殊工艺' }),
+      el('span', { text: parts.join(' / ') }),
+      el('span', { class: 'foil-rate-note', text: '卡图不变，只是卡面质感不同；在图鉴里点开大图可以逐张切回原图看。' }),
+    ])
+  }
+
+  /**
+   * 图鉴里这张卡**现在该按哪种工艺显示**。
+   *
+   * 规则（用户要求）：
+   *   · 没拥有过的工艺**不显示效果**（所以这里只在自己拥有的里面挑）
+   *   · 拥有的话默认显示**最好的那一种**，读者可以在大图里逐张切换
+   *   · 切换结果存在 localStorage（读者偏好，不写服务端）
+   */
+  function finishFor(cardId) {
+    var owned = ownedFoils(cardId)
+    if (!owned.length) return ''
+    var picked = (state.foilView || {})[cardId]
+    // 明确选了「普通」——这必须和「没选过」区分开：没选过要显示最好的那一种，
+    // 选过普通就是要看原图。所以「普通」存的是一个哨兵值，不是把键删掉。
+    if (picked === PLAIN_PICK) return ''
+    var pid = foilId(picked)
+    if (pid && owned.indexOf(pid) >= 0) return pid
+    return owned[owned.length - 1]
+  }
+
+  function setFoilView(cardId, finish) {
+    if (!cardId) return
+    var m = state.foilView && typeof state.foilView === 'object' ? Object.assign({}, state.foilView) : {}
+    if (String(finish) === '') m[cardId] = PLAIN_PICK
+    else {
+      var id = foilId(finish)
+      if (id) m[cardId] = id
+      else delete m[cardId]
+    }
+    state.foilView = m
+    lsSet(LS.foilView, m)
+  }
+
+  /**
    * 一张卡是否匹配图鉴搜索词。
    *
    * 匹配范围：角色名 / 系列名 / 稀有度（id 与 label 都算）。
@@ -2113,6 +2340,9 @@
     )
 
     var listBox = el('div', { class: 'coll-list' })
+    // 工艺筛选条：只有真的抽到过闪卡才出现（否则是一排点了没反应的按钮）
+    var filterRow = foilFilterRow()
+    if (filterRow) wrap.appendChild(filterRow)
     wrap.appendChild(listBox)
 
     /**
@@ -2139,8 +2369,20 @@
       return el('div', { class: 'grid cards' }, list.map(function (c) {
         var n = Number(owned[c.id] || 0)
         var holder = el('div', { class: 'coll-cell' + (n > 0 ? '' : ' coll-locked') })
-        holder.appendChild(cardFigure(c))
+        // 闪卡效果只在自己拥有时才显示（finishFor 只在自己拥有的工艺里挑）
+        holder.appendChild(cardFigure(c, { finish: finishFor(c.id) }))
         if (n > 0) holder.appendChild(el('div', { class: 'badge-owned', text: n > 1 ? '×' + n : '已获得' }))
+        // 拥有的闪卡在格子上挂一个小标签，一眼能扫出「这张我有工艺版本」
+        var ownedFin = ownedFoils(c.id)
+        if (ownedFin.length) {
+          holder.appendChild(
+            el('div', {
+              class: 'badge-foil',
+              text: ownedFin.map(foilLabel).join(' · '),
+              title: '已拥有的特殊工艺：' + ownedFin.map(foilLabel).join('、'),
+            })
+          )
+        }
         var open = el('button', {
           class: 'coll-open',
           type: 'button',
@@ -2152,6 +2394,69 @@
         holder.appendChild(open)
         return holder
       }))
+    }
+
+    /**
+     * 工艺筛选条：只列**自己真的抽到过**的工艺，点了只看那些卡。
+     * 用户要求「同样仅能查看已经抽取出的特殊工艺卡」，所以每种工艺的计数
+     * 也是按「拥有的卡」算的，而不是按整个名册。
+     */
+    function foilFilterRow() {
+      var kinds = foilKinds()
+      if (!kinds.length) return null
+      var counts = {}
+      var foilCards = 0
+      allCards.forEach(function (c) {
+        var ownedFin = ownedFoils(c.id)
+        if (!ownedFin.length) return
+        foilCards++
+        ownedFin.forEach(function (f) {
+          counts[f] = (counts[f] || 0) + 1
+        })
+      })
+      if (!foilCards) return null
+      var row = el('div', { class: 'foil-filter' })
+      row.appendChild(el('span', { class: 'foil-filter-key', text: '特殊工艺' }))
+      row.appendChild(chip('', '全部', null))
+      kinds.forEach(function (k) {
+        if (!counts[k.id]) return
+        row.appendChild(chip(k.id, k.label, counts[k.id]))
+      })
+      syncChips()
+      return row
+
+      function chip(id, label, count) {
+        var on = String(state.foilFilter || '') === id
+        var b = el('button', {
+          class: 'foil-chip' + (on ? ' is-on' : '') + (id ? ' foil-chip-' + id : ''),
+          type: 'button',
+          'data-foil-filter': id,
+          'aria-pressed': on ? 'true' : 'false',
+          title: '只看拥有' + (id ? '「' + label + '」' : '任意特殊工艺') + '的卡',
+        }, [el('span', { text: label }), count === null ? null : el('span', { class: 'foil-chip-count', text: String(count) })])
+        b.addEventListener('click', function () {
+          state.foilFilter = id
+          syncChips()
+          paint()
+        })
+        return b
+      }
+
+      /**
+       * 把「哪一个亮着」对齐到 state.foilFilter。
+       *
+       * 整条筛选条是**建视图时画一次**，而点 chip 只重画下面的列表 ——
+       * 不自己更新的话，列表变了而按钮还亮在「全部」上，看起来像点了没生效。
+       */
+      function syncChips() {
+        var cur = String(state.foilFilter || '')
+        var all = row.querySelectorAll('[data-foil-filter]')
+        for (var i = 0; i < all.length; i++) {
+          var on = String(all[i].getAttribute('data-foil-filter') || '') === cur
+          all[i].className = all[i].className.replace(/\s*\bis-on\b/, '') + (on ? ' is-on' : '')
+          all[i].setAttribute('aria-pressed', on ? 'true' : 'false')
+        }
+      }
     }
 
     function paint() {
@@ -2195,15 +2500,21 @@
       }
 
       groups.forEach(function (g) {
-        // 先按搜索词过滤：一级组里只剩匹配的卡/子组
+        // 先按搜索词 + 工艺筛选过滤：一级组里只剩匹配的卡/子组
+        var ff = String(state.foilFilter || '')
+        var keep = function (c) {
+          if (!cardMatches(c, q)) return false
+          if (!ff) return true
+          // 工艺筛选用的是**拥有的工艺**，不是「现在显示的那一种」——
+          // 读者切到普通版看原图时，筛选不该把他筛掉。
+          return ownedFoils(c.id).indexOf(ff) >= 0
+        }
         var children = (g.children || [])
           .map(function (sg) {
-            return { sg: sg, list: sg.cards.filter(function (c) { return cardMatches(c, q) }) }
+            return { sg: sg, list: sg.cards.filter(keep) }
           })
           .filter(function (x) { return x.list.length })
-        var gCards = g.flat
-          ? g.cards.filter(function (c) { return cardMatches(c, q) })
-          : children.reduce(function (acc, x) { return acc.concat(x.list) }, [])
+        var gCards = g.flat ? g.cards.filter(keep) : children.reduce(function (acc, x) { return acc.concat(x.list) }, [])
         if (!gCards.length) return
 
         shownGroups++
@@ -2619,6 +2930,8 @@
         el('span', { class: 'hist-idx', text: '#' + fmt(h.index) }),
         rarityChip(h.rarity),
         el('span', { class: 'hist-name', text: card ? card.name : h.cardId + '（这张卡已不在名册里）' }),
+        // 这一张是闪卡：记录里也要标出来，否则「我明明抽到过红碎」查不到证据
+        foilId(h.finish) ? el('span', { class: 'badge-foil-hist badge-foil-' + h.finish, text: foilLabel(h.finish) }) : null,
         h.duplicate
           ? el('span', { class: 'badge-dup small', text: '重复 +' + fmt(h.shards || 0) + ' 碎片' })
           : el('span', { class: 'badge-new small', text: 'NEW' }),
@@ -2850,6 +3163,73 @@
           el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-reveal' }, ['保存表情包与动画']),
         ]),
         el('p', { class: 'panel-hint', text: '表情包文件名写相对路径或受控目录内的绝对路径都行；转发 URL 由服务端算好下发。' }),
+      ])
+    )
+
+    // --- 特殊工艺（闪卡）--------------------------------------------------
+    //
+    // 概率与门槛以前只能改 data.json —— 功能在，但作者够不着。它们的形状是
+    // 「一门工艺一组值」，所以和表情包那块一样，按 FOIL_KINDS 铺一行一个。
+    //
+    // ⚠️ 门槛用**档位 id**，判定时比的是档位表里的 rank。写了档位表里没有的 id
+    // 时刻意**不改成「不限制」**（那会把稀有工艺放给所有卡），而是让这门工艺出不来；
+    // 这里把它当成一个选项显示出来，作者一眼能看出是哪一档写错了。
+    var foilCfg = s.foils || {}
+    var foilRates = foilCfg.rates || {}
+    var foilMins = foilCfg.minRarity || {}
+    var foilKindsUi = foilKinds()
+    /**
+     * 一门工艺的「最低稀有度」下拉框。
+     *
+     * 当前值**不在档位表里**时，额外加一个把它原样显示出来的选项：
+     * 不加的话下拉框会静默落到第一个选项（= 不限制），作者一保存就把
+     * 「这一档不会出」这个事实改成了「所有卡都能出」—— 稀有工艺会突然泛滥，
+     * 而且没有任何迹象表明是保存按钮干的。
+     */
+    function foilMinSelect(k) {
+      var ids = rarityList().map(function (r) { return r.id })
+      var cur = String(foilMins[k.id] === undefined ? k.minRarity || '' : foilMins[k.id] || '')
+      var sel = el('select', { 'data-bind': 'foil-min-' + k.id })
+      var none = el('option', { value: '', text: '不限制（所有档位都能出）' })
+      none.selected = !cur
+      sel.appendChild(none)
+      rarityList().forEach(function (r) {
+        var o = el('option', { value: r.id, text: (r.label || r.id) + ' 及以上' })
+        if (r.id === cur) o.selected = true
+        sel.appendChild(o)
+      })
+      if (cur && ids.indexOf(cur) < 0) {
+        var bad = el('option', { value: cur, text: cur + '（档位表里没有这一档 —— 这一档不会出）' })
+        bad.selected = true
+        sel.appendChild(bad)
+      }
+      return sel
+    }
+    wrap.appendChild(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'panel-title', text: '③-4 特殊工艺（闪卡）' }),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '只改视觉，卡图不动。判定是「一掷定档」：先看最稀有的那一档，再看低一档 —— ' +
+            '所以每一档的实测概率就是这里填的数。某一档因为稀有度门槛不适用时，' +
+            '它的概率**不会**并到低档去（低档卡拿不到高档工艺）。',
+        }),
+        field('开启特殊工艺（关掉 = 永远出普通卡）', select(['true', 'false'], String(foilCfg.enabled !== false), 'foil-enabled')),
+        el('div', { class: 'panel-sub' }, foilKindsUi.map(function (k) {
+          return field(
+            (k.label || k.id) + ' · 概率（%，0 = 不出这一档）',
+            input('number', String(foilRates[k.id] === undefined ? '' : foilRates[k.id]), 'foil-rate-' + k.id, k.id)
+          )
+        })),
+        el('div', { class: 'panel-sub' }, foilKindsUi.map(function (k) {
+          return field((k.label || k.id) + ' · 最低稀有度', foilMinSelect(k))
+        })),
+        foilKindsUi.length ? null : el('p', { class: 'panel-hint', text: 'page/draw.js 没加载成功，读不到工艺定义。' }),
+        el('div', { class: 'panel-actions' }, [
+          el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-foils' }, ['保存特殊工艺']),
+        ]),
+        el('p', { class: 'panel-hint', text: '概率是百分数，和出率表同一套写法：20 = 每一百张里约二十张。留空按 0 处理。' }),
       ])
     )
 
@@ -3281,6 +3661,42 @@
       })
     }
 
+    var saveFoils = q('save-foils')
+    if (saveFoils) {
+      saveFoils.addEventListener('click', function () {
+        var kinds = foilKinds()
+        var rates = {}
+        var mins = {}
+        for (var i = 0; i < kinds.length; i++) {
+          var id = kinds[i].id
+          var node = q('foil-rate-' + id)
+          var raw = node ? String(node.value).trim() : ''
+          if (raw === '') {
+            rates[id] = 0
+            continue
+          }
+          var n = Number(raw)
+          // 概率写错必须先拦下来：写成 150 不会报任何错，只会让「排在它后面的那一档
+          // 永远抽不到」，而界面上还显示着作者写进去的数字 —— 属于「改了没生效」
+          // 里最难查的一类。
+          if (!Number.isFinite(n) || n < 0 || n > 100) {
+            window.alert('概率要写成 0~100 之间的数（现在是「' + raw + '」，工艺：' + (kinds[i].label || id) + '）')
+            return
+          }
+          rates[id] = n
+          var sel = q('foil-min-' + id)
+          mins[id] = sel ? String(sel.value || '') : ''
+        }
+        var en = q('foil-enabled')
+        request('/settings.json', {
+          method: 'POST',
+          body: { foils: { enabled: en ? en.value !== 'false' : true, rates: rates, minRarity: mins } },
+        })
+          .then(function (res) { afterWrite(res, '特殊工艺已保存') })
+          .catch(fail)
+      })
+    }
+
     state.data.pools.forEach(function (p) {
       var btn = q('save-pool-' + p.id)
       if (btn) {
@@ -3555,6 +3971,7 @@
       return
     }
     state.cardOpen = card.id
+    wireInspect(state.els.cardDialogCard)
     paintCardDialog(card)
     showModal(dlg)
   }
@@ -3562,6 +3979,249 @@
   function closeCardDialog() {
     state.cardOpen = ''
     hide(state.els.cardDialog)
+    repaintAfterFoilPick()
+  }
+
+  /**
+   * 在大图里换了工艺之后，图鉴格子上那张卡还是旧的样子 ——
+   * 关掉弹层时必须重画一次，否则「我明明切成普通版了，关掉还是闪的」。
+   *
+   * 只在真的换过的时候重画（点开看一眼就关掉不该触发整页 render）。
+   */
+  function repaintAfterFoilPick() {
+    if (!state.foilViewDirty) return
+    state.foilViewDirty = false
+    render()
+  }
+
+  /**
+   * 大图里这张卡按哪种工艺显示：把光效层插进（或移出）检视容器。
+   *
+   * 每次重画都**先清空再插**，而不是切换类名：层数随工艺不同
+   *（红碎多一层粒子），增量改类名很容易留下上一次的残留层。
+   */
+  function paintCardFoil(card, finish) {
+    var boxNode = state.els.cardDialogCard
+    if (!boxNode) return
+    var old = boxNode.querySelectorAll('.foil-shine, .foil-shards, .foil-glare, .foil-sparks')
+    for (var i = 0; i < old.length; i++) old[i].remove()
+    boxNode.className =
+      'card-dialog-card card-inspect' +
+      (finish ? ' card-foil card-foil-' + finish : '')
+    if (finish) boxNode.setAttribute('data-finish', finish)
+    else boxNode.removeAttribute('data-finish')
+    // 浮雕边框按稀有度取色（和网格里的卡同一套变量名）
+    var r = rarityById(card.rarity)
+    if (r && r.color) boxNode.style.setProperty('--rarity-color', r.color)
+    // 卡名在弹层标题上（不在卡面里），所以「银灰 / 金色 / 红字描边」这条要用
+    // 弹层自己的 data-finish 选中 —— 只写在检视容器上就选不到标题。
+    var dlg = state.els.cardDialog
+    if (dlg) {
+      if (finish) dlg.setAttribute('data-finish', finish)
+      else dlg.removeAttribute('data-finish')
+    }
+    if (!finish) return
+    boxNode.appendChild(el('span', { class: 'foil-shine', 'aria-hidden': 'true' }))
+    if (finish === 'shatter') boxNode.appendChild(el('span', { class: 'foil-shards', 'aria-hidden': 'true' }))
+    boxNode.appendChild(el('span', { class: 'foil-glare', 'aria-hidden': 'true' }))
+    if (finish === 'shatter') boxNode.appendChild(el('span', { class: 'foil-sparks', 'aria-hidden': 'true' }))
+  }
+
+  /**
+   * 工艺切换胶囊：普通 + 自己拥有的每一种。
+   *
+   * 一种都没拥有时不显示任何东西（也提示一句「抽到闪卡就能在这里切换」，
+   * 否则读者不知道这个功能存在）。检视提示跟着一起给。
+   */
+  function paintFoilSwitch(card, owned, shown) {
+    var box = state.els.cardDialogFoils
+    var tip = state.els.cardDialogInspect
+    if (box) clear(box)
+    if (tip) {
+      tip.hidden = false
+      tip.textContent = '拖动卡面可以换个角度看' + (shown ? '（闪卡的光会跟着动）' : '')
+    }
+    if (!box) return
+    if (!owned.length) {
+      box.appendChild(
+        el('div', { class: 'card-dialog-foil-hint', text: '这张卡还没有特殊工艺版本 —— 抽卡时有概率抽到平闪 / 全闪 / 红碎。' })
+      )
+      return
+    }
+    var picks = [{ id: '', label: '普通' }].concat(
+      foilKinds()
+        .filter(function (k) {
+          return owned.indexOf(k.id) >= 0
+        })
+        .map(function (k) {
+          return { id: k.id, label: k.label || k.id }
+        })
+    )
+    picks.forEach(function (p) {
+      var on = p.id ? shown === p.id : !shown
+      var b = el('button', {
+        class: 'foil-chip' + (on ? ' is-on' : '') + (p.id ? ' foil-chip-' + p.id : ''),
+        type: 'button',
+        'data-foil-pick': p.id,
+        'aria-pressed': on ? 'true' : 'false',
+        text: p.label,
+      })
+      b.addEventListener('click', function () {
+        setFoilView(card.id, p.id)
+        state.foilViewDirty = true
+        paintCardDialog(card)
+      })
+      box.appendChild(b)
+    })
+  }
+
+  /**
+   * 检视：按住卡面拖动 → 换角度。
+   *
+   * 角度与光照位置都写成 CSS 变量（CSP 下不能用内联 style，CSSOM 可以）：
+   *   --tilt-x/--tilt-y   卡片倾斜（rotateX / rotateY）
+   *   --pointer-x/--pointer-y  光照中心（光效层的渐变中心）
+   *   --background-x/--background-y  彩虹/闪点层的位移
+   *
+   * ⚠️ `pointer-x/y` 要和 `tilt` **方向一致**：向右拖时卡片右转，
+   * 高光也应该往右走 —— 反过来会像「光从背面照过来」，很怪。
+   */
+  function wireInspect(node) {
+    if (!node || node.__inspectWired) return
+    node.__inspectWired = true
+    var drag = null
+    /**
+     * 拖动期间那张卡面的位置与尺寸。
+     *
+     * ⚠️ **只在按下时读一次**，绝不放进 pointermove 里。
+     * 第一版每收到一个 pointermove 就 `getBoundingClientRect()`，而它前面
+     * 刚写过 CSS 变量（等于把样式标脏了）—— 于是**每个事件都强制同步重排一次整页**。
+     * 鼠标的 pointermove 频率可以到 1000Hz，加上弹层背后是一整页图鉴卡片，
+     * 主线程直接饱和：表现就是「按住拖一下，整个网站卡住」。
+     * 拖动期间卡片只会倾斜（transform 不改变布局盒），所以这份矩形一直是有效的；
+     * 窗口尺寸变了就作废，下一次按下重新读。
+     */
+    var rect = null
+    /** 攒到下一帧再写的目标值（一帧最多写一次） */
+    var pending = null
+    var frame = 0
+
+    var apply = function (nx, ny) {
+      // nx/ny 是 0~1 的归一化位置（相对卡面）
+      var cx = (nx - 0.5) * 2
+      var cy = (ny - 0.5) * 2
+      node.style.setProperty('--tilt-y', (cx * 13).toFixed(2) + 'deg')
+      node.style.setProperty('--tilt-x', (-cy * 13).toFixed(2) + 'deg')
+      node.style.setProperty('--pointer-x', (nx * 100).toFixed(1) + '%')
+      node.style.setProperty('--pointer-y', (ny * 100).toFixed(1) + '%')
+      // 背景位移收窄到 37%~63%：和参考实现一样，让光带「动但不过头」
+      node.style.setProperty('--background-x', (50 + cx * 13).toFixed(1) + '%')
+      node.style.setProperty('--background-y', (50 + cy * 17).toFixed(1) + '%')
+    }
+
+    var flush = function () {
+      frame = 0
+      if (!pending) return
+      var p = pending
+      pending = null
+      apply(p.nx, p.ny)
+    }
+
+    /**
+     * 把指针位置换算成 0~1。
+     *
+     * rect 拿不到（没排版 / 尺寸为 0）时返回 null —— 页面里所有依赖坐标的
+     * 功能都要能「什么都没发生」，不能拿 0 去除。
+     */
+    var norm = function (ev) {
+      if (!rect) rect = node.getBoundingClientRect()
+      if (!rect.width || !rect.height) return null
+      return {
+        nx: Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width)),
+        ny: Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height)),
+      }
+    }
+
+    var move = function (ev) {
+      if (!drag) return
+      var p = norm(ev)
+      if (!p) return
+      // 一帧只写一次：指针事件比屏幕刷新快得多（高刷新率鼠标能到 1000Hz），
+      // 每个事件都写一次 CSS 变量 = 每秒钟上千次样式失效 + 重绘，
+      // 而肉眼能看到的只有一帧一个画面。
+      pending = p
+      if (!frame) frame = requestFrame(flush)
+    }
+
+    node.addEventListener('pointerdown', function (ev) {
+      drag = { id: ev.pointerId }
+      /*
+       * ⚠️ 这一句是「拖动会不会变成拖图片」的关键。
+       *
+       * 不拦的话，按下再拖会触发浏览器的**原生图片拖拽**：出现半透明残影、
+       * 光标变成禁止符号，而我们的 pointermove 从此收不到事件 ——
+       * 读者看到的是「拖出来一张图」，而不是「转卡片看反光」。
+       * 同一个动作也顺带把「拖过卡面时选中了旁边的文字」一起挡掉。
+       *
+       * 用 preventDefault 而不是只靠 draggable="false"：
+       * 属性管得住 <img>，管不住包在外面那层容器上的文本选择；
+       * 而 preventDefault 一句话把这两件事都按住了（卡面里没有任何可聚焦的东西，
+       * 所以不会影响键盘操作）。
+       */
+      if (ev && typeof ev.preventDefault === 'function') ev.preventDefault()
+      // 布局只在这一刻读一次（此时还没写过任何变量）
+      rect = node.getBoundingClientRect()
+      node.className = node.className.indexOf('is-inspecting') < 0 ? node.className + ' is-inspecting' : node.className
+      if (typeof node.setPointerCapture === 'function' && ev.pointerId !== undefined) {
+        try {
+          node.setPointerCapture(ev.pointerId)
+        } catch (e) {}
+      }
+      move(ev)
+    })
+    node.addEventListener('pointermove', move, { passive: true })
+    /**
+     * 兜底：即使上面那一句因为某种原因没生效（老浏览器、合成事件、
+     * 触摸长按），也不许浏览器把这张卡当成可拖拽对象。
+     */
+    node.addEventListener('dragstart', function (ev) {
+      if (ev && typeof ev.preventDefault === 'function') ev.preventDefault()
+    })
+    var end = function () {
+      drag = null
+      pending = null
+      if (frame) {
+        cancelFrame(frame)
+        frame = 0
+      }
+      // 只在真的挂着 is-inspecting 时才改类名：className 赋值会让样式失效，
+      // 而 pointerleave 在「鼠标只是路过卡片」时也会响 —— 那属于白白的重绘。
+      if (node.className.indexOf(' is-inspecting') >= 0) {
+        node.className = node.className.replace(' is-inspecting', '')
+      }
+    }
+    node.addEventListener('pointerup', end)
+    node.addEventListener('pointercancel', end)
+    node.addEventListener('pointerleave', function () {
+      if (!drag) end()
+    })
+    // 尺寸变了（窗口缩放 / 旋屏）就把缓存作废，下一次按下重新量
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('resize', function () {
+        rect = null
+      })
+    }
+  }
+
+  /** 下一帧执行（没有 requestAnimationFrame 时退回 setTimeout，行为一致但更慢） */
+  function requestFrame(fn) {
+    if (typeof window.requestAnimationFrame === 'function') return window.requestAnimationFrame(fn)
+    return window.setTimeout(fn, 16)
+  }
+
+  function cancelFrame(id) {
+    if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(id)
+    else window.clearTimeout(id)
   }
 
   function paintCardDialog(card) {
@@ -3579,6 +4239,15 @@
       chips.appendChild(rarityChip(card.rarity, { big: true }))
       if (card.series) chips.appendChild(el('span', { class: 'series-chip', text: card.series }))
     }
+
+    // ---- 特殊工艺：显示哪一张、能切哪几种 --------------------------------
+    //
+    // 只有**自己拥有**的工艺才会显示效果（用户要求），所以这里先问 finishFor：
+    // 没拥有过任何工艺时它返回 ''，卡片就是一张普通的图。
+    var owned = ownedFoils(card.id)
+    var shown = finishFor(card.id)
+    paintCardFoil(card, shown)
+    paintFoilSwitch(card, owned, shown)
 
     // 大图：用卡面上同一份 URL（服务端 / 导出脚本算好的），前端不拼路径
     var nofile = state.els.cardDialogNofile
@@ -3942,8 +4611,12 @@
       })
     }
     // 大图弹层被 Esc / 点遮罩关掉时，state.cardOpen 也要跟着清掉，
-    // 否则再点同一张卡会被误判成「已经开着」。
-    if (e.cardDialog) e.cardDialog.addEventListener('close', function () { state.cardOpen = '' })
+    // 否则再点同一张卡会被误判成「已经开着」。这条路径不经过 closeCardDialog，
+    // 所以换过工艺时的重画也要在这里补一次。
+    if (e.cardDialog) e.cardDialog.addEventListener('close', function () {
+      state.cardOpen = ''
+      repaintAfterFoilPick()
+    })
     // 图片缓存：入口在页脚（静态站与动态站都要有，所以不放在后台里）
     if (e.cacheBtn) e.cacheBtn.addEventListener('click', openCacheDialog)
     if (e.cacheClose) e.cacheClose.addEventListener('click', function () { hide(e.cacheDialog) })
@@ -3984,7 +4657,15 @@
             var results = []
             for (var i = 0; i < saved.ids.length; i++) {
               var c = cardById(saved.ids[i])
-              if (c) results.push({ card: c, rarityId: c.rarity, isNew: false })
+              if (c) {
+                results.push({
+                  card: c,
+                  rarityId: c.rarity,
+                  isNew: false,
+                  // 工艺也要还原，否则刷新之后「刚才那张闪卡」变回普通卡
+                  finish: foilId(saved.finishes && saved.finishes[i]),
+                })
+              }
             }
             if (results.length) state.last = { poolId: saved.poolId, at: saved.at, results: results }
           }
@@ -4029,6 +4710,10 @@
     // 数据里已经没有这个池时由 currentPool() 兜回第一个池。
     var savedPool = lsGet(LS.pool, '')
     if (savedPool) state.poolId = String(savedPool)
+    // 读者偏好：图鉴里每张卡选中的闪卡工艺。**必须在这里恢复**，
+    // 否则刷新一次又变回「显示最好的那一种」，读者会以为切换没生效。
+    var savedFoil = lsGet(LS.foilView, null)
+    state.foilView = savedFoil && typeof savedFoil === 'object' && !Array.isArray(savedFoil) ? savedFoil : {}
     // 图片缓存：注册 Service Worker。放在数据加载**之前** ——
     // 越早注册，越早开始接管图片请求；失败也不影响页面。
     registerServiceWorker()
