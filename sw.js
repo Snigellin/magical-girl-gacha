@@ -27,10 +27,12 @@
  * 长缓存头（派生图是 `private, max-age=604800`）。
  */
 
-const CACHE_NAME = 'gacha-img-v1'
+const CACHE_NAME = 'gacha-img-v2'
 
 /** 只有内容寻址的卡面/横幅会进缓存。改这个正则前先读上面第 1、2 条。 */
 const CACHEABLE = /\/assets\/img\/[^/]+$/
+
+const MIRROR_HOST = /(^|\.)gitee\.com$|(^|\.)giteeusercontent\.com$|(^|\.)githubusercontent\.com$/
 
 /** 上限，超过就删最早的一批（Cache Storage 的 keys() 按插入顺序） */
 const MAX_ENTRIES = 400
@@ -64,9 +66,9 @@ self.addEventListener('fetch', (event) => {
   } catch (e) {
     return
   }
-  // 跨域（例如以后放 CDN）不碰：不透明响应缓存起来只会添乱
-  if (url.origin !== self.location.origin) return
-  if (!CACHEABLE.test(url.pathname)) return
+  const sameOriginAsset = url.origin === self.location.origin && CACHEABLE.test(url.pathname)
+  const mirrorAsset = MIRROR_HOST.test(url.hostname) && CACHEABLE.test(url.pathname)
+  if (!sameOriginAsset && !mirrorAsset) return
   event.respondWith(cacheFirst(req))
 })
 
@@ -82,8 +84,8 @@ async function cacheFirst(req) {
   try {
     // req 自带 cache 模式，所以 fetch(req) 本身就会绕过 HTTP 缓存
     const res = await fetch(req)
-    // 只缓存「同源 + 200」的完整响应；206/opaque/错误一律不缓存
-    if (res && res.ok && res.type === 'basic') {
+    const cacheable = res && ((res.ok && (res.type === 'basic' || res.type === 'cors')) || res.type === 'opaque')
+    if (cacheable) {
       await trimCache(cache)
       // 用 url.pathname 而不是 req 当钥匙：force 请求的 cache 模式是 reload，
       // 直接 put(req) 有被规范挡掉的风险，而钥匙本来就该是「干净的地址」。
