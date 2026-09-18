@@ -360,14 +360,17 @@
    *
    * ⚠️ 判定顺序是**从高到低**：红碎 -> 全闪 -> 平闪。这样每一档的实测概率
    * 就等于配置里那个数（0.5% / 5% / 20%），而不是「叠加上去」。
+   *
+   * @param {object} [rates] 覆写概率表（追梦池用另一套：40/10/1）。
+   *   不传就读全局配置 —— 这样老的调用方一行都不用改。
    */
-  function foilRoll(data, rarityId, rng) {
+  function foilRoll(data, rarityId, rng, rates) {
     var cfg = (data && data.settings && data.settings.foils) || {}
     if (cfg.enabled === false) return ''
-    var rates = cfg.rates || {}
-    var pShatter = foilAllowed(data, 'shatter', rarityId) ? Number(rates.shatter || 0) : 0
-    var pFull = foilAllowed(data, 'full', rarityId) ? Number(rates.full || 0) : 0
-    var pFlat = foilAllowed(data, 'flat', rarityId) ? Number(rates.flat || 0) : 0
+    var table = rates && typeof rates === 'object' ? rates : cfg.rates || {}
+    var pShatter = foilAllowed(data, 'shatter', rarityId) ? Number(table.shatter || 0) : 0
+    var pFull = foilAllowed(data, 'full', rarityId) ? Number(table.full || 0) : 0
+    var pFlat = foilAllowed(data, 'flat', rarityId) ? Number(table.flat || 0) : 0
     if (!(pShatter > 0) && !(pFull > 0) && !(pFlat > 0)) return ''
     var r = rng() * 100
     if (pShatter > 0 && r < pShatter) return 'shatter'
@@ -438,6 +441,11 @@
     }
     var idx = indexes(data, pool)
     var weights = pool.weights || {}
+    // 追梦模式：用另一套权重（并按「已经连抽了多少次没出 SP」把 SP 抬上去）
+    var dream = !!opts.dream && !!dreamConfig(pool)
+    var dreamInfo = dream ? dreamWeights(data, pool, opts.dreamSteps === undefined ? dreamSteps(data, pool.id) : opts.dreamSteps) : null
+    if (dreamInfo) weights = dreamInfo.weights
+    var foilRates = dream ? dreamFoilRates(data, pool) : null
 
     // 参与掷档的稀有度：权重 > 0，且池子里真的有这一档的卡。
     // 「权重 > 0 但无卡」必须提前排除，否则会抽到一个空的档位然后返回 undefined。
@@ -539,9 +547,10 @@
     if (!card) return { ok: false, error: '卡牌 ' + pickId + ' 在名册里找不到（数据不一致）' }
 
     // 特殊工艺：每一张都有概率以闪卡的形式被抽出（与卡图无关，只影响显示）
-    var finish = foilRoll(data, rarityId, rng)
+    // 追梦池用上调后的那套概率（40/10/1）
+    var finish = foilRoll(data, rarityId, rng, foilRates)
 
-    return { ok: true, card: card, rarityId: rarityId, forced: forcedKind, finish: finish }
+    return { ok: true, card: card, rarityId: rarityId, forced: forcedKind, finish: finish, dream: dream }
   }
 
   /**
@@ -578,15 +587,26 @@
     }
 
     var results = []
+    // 追梦计数在这一轮里**逐抽推进**：每一抽都用「到目前为止的计数」算权重，
+    // 抽到 SP 就归零。只在轮末算一次的话，一轮十连里后九抽用的都是旧概率 ——
+    // 那和「每次抽卡都会使 SP 概率增加」这句话不符。
+    var dreamOn = !!opts.dream && !!dreamConfig(pool)
+    var dSteps = dreamOn ? Number(opts.dreamSteps === undefined ? dreamSteps(data, pool.id) : opts.dreamSteps) || 0 : 0
     for (var n = 0; n < count; n++) {
       // SP 保底：每一抽都按「到目前为止的结果」重算一次开关，所以同一轮十连里
       // 抽到重复 SP 之后，后面的几抽就已经看不到那张卡了
       //（用户原话：「暂时移出当前卡池，直到下一次 SP 抽出来才移回来」）。
       // 用 `spPityAfter` 重放前缀而不是自己维护一个可变状态：这套规则只有一份实现。
       var mid = spPityAfter(data, pool, results)
-      var one = drawSingle(data, poolId, { rng: rng, _sp: { active: mid.active, owned: mid.owned } })
+      var one = drawSingle(data, poolId, {
+        rng: rng,
+        _sp: { active: mid.active, owned: mid.owned },
+        dream: dreamOn,
+        dreamSteps: dSteps,
+      })
       if (!one.ok) return one
       results.push(one)
+      if (dreamOn) dSteps = dreamStepsAfter(data, pool, dSteps, [one]).steps
     }
 
     // 十连保底：count >= 10 时，若这一轮里没有任何一张达到保底档，
@@ -610,6 +630,8 @@
           rng: rng,
           _forceRarity: guarantee,
           _sp: { active: guaranteeSp.active, owned: guaranteeSp.owned },
+          dream: dreamOn,
+          dreamSteps: dSteps,
         })
         if (forced.ok) {
           // ⚠️ 只有真的出了保底档才算保底生效。若保底档在这个池子里抽不出来，
@@ -630,20 +652,272 @@
     // 结论会不一样。重放一遍是纯函数，比在循环里小心翼翼地回滚可靠得多。
     var spAfter = spPityAfter(data, pool, results)
 
-    return { ok: true, results: results, poolId: pool.id, spPity: { active: spAfter.active, changed: spAfter.changed } }
+    // 追梦计数：同样在保底替换之后再重放一遍，结论才和最终结果一致
+    var dreamAfter = dreamOn ? dreamStepsAfter(data, pool, opts.dreamSteps === undefined ? dreamSteps(data, pool.id) : opts.dreamSteps, results) : null
+
+    return {
+      ok: true,
+      results: results,
+      poolId: pool.id,
+      dream: dreamOn,
+      spPity: { active: spAfter.active, changed: spAfter.changed },
+      dreamSteps: dreamAfter ? dreamAfter.steps : null,
+      dreamReset: dreamAfter ? dreamAfter.reset : false,
+    }
   }
 
   // -------------------------------------------------------------------------
   // 花费与统计
   // -------------------------------------------------------------------------
 
-  /** 一次抽卡要花多少。十连与单抽的价格可以不同。 */
-  function costFor(data, count) {
+  // -------------------------------------------------------------------------
+  // 追梦池（用户 2026-09-18 要求）
+  // -------------------------------------------------------------------------
+  //
+  // 「为现有的卡池增加『追梦池』的切换选项」——所以它是**每个池子上的一个开关**，
+  // 不是第三个池子：同一个池子在追梦模式下用另一套出率、另一套工艺概率，
+  // 而且要花抽卡券（普通模式依旧免费）。
+  //
+  //   · 出率：SR 30% / SSR 50% / UR 17.5% / SP 2.5%
+  //   · 工艺：平闪 40% / 全闪 10% / 红碎 1%
+  //   · **动态概率**：每抽一次 SP +0.1%、SR -0.1%，最多累计 75 次；
+  //     抽到 SP 就归零。所以「标称概率」在追梦池里是**随次数变化**的，
+  //     显示与实际都必须按当前次数算（见 rateTable / dreamLongRunRates）。
+
+  /** 取一个池子的追梦配置；这个池子没有追梦模式时返回 null */
+  function dreamConfig(pool) {
+    var d = pool && pool.dream
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return null
+    if (d.enabled === false) return null
+    var w = d.weights && typeof d.weights === 'object' ? d.weights : null
+    if (!w) return null
+    return d
+  }
+
+  /** 这个池子能不能切到追梦模式（界面上要不要显示那个开关） */
+  function dreamAvailable(pool) {
+    return !!dreamConfig(pool)
+  }
+
+  /** 追梦计数（`player.dream[poolId]`）：已经连续抽了多少次没出 SP */
+  function dreamSteps(data, poolId) {
+    var m = data && data.player && data.player.dream
+    if (!m || typeof m !== 'object') return 0
+    var raw = Number(m[poolId])
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0
+  }
+
+  /**
+   * 当前次数下的**有效出率权重**。
+   *
+   * SP 每累计一次 +spStep，从 `spFrom`（默认最低档，就是 SR）那一档**等量扣掉** ——
+   * 一加一减，权重合计不变，所以归一化之后就是「SP 涨多少、SR 就掉多少」，
+   * 而 SSR/UR 的百分比不受影响。
+   *
+   * @returns {{weights:object, steps:number, cap:number, spId:string, fromId:string}}
+   */
+  function dreamWeights(data, pool, steps) {
+    var d = dreamConfig(pool) || {}
+    var base = d.weights || {}
+    var cap = Math.max(0, Math.floor(Number(d.spMaxSteps === undefined ? 75 : d.spMaxSteps) || 0))
+    var step = Number(d.spStep === undefined ? 0.1 : d.spStep)
+    if (!Number.isFinite(step) || step < 0) step = 0
+    var k = Math.max(0, Math.min(cap, Math.floor(Number(steps) || 0)))
+    var spId = topRarityId(data)
+    var fromId = String(d.spFrom || lowestRarityId(data) || '')
+    var out = {}
+    for (var rid in base) {
+      if (Object.prototype.hasOwnProperty.call(base, rid)) out[rid] = Number(base[rid] || 0)
+    }
+    var shift = k * step
+    if (spId && out[spId] !== undefined) out[spId] = out[spId] + shift
+    if (fromId && out[fromId] !== undefined) out[fromId] = Math.max(0, out[fromId] - shift)
+    return { weights: out, steps: k, cap: cap, spId: spId, fromId: fromId }
+  }
+
+  /** 最低档的 id（rank 最小的那一档）。表为空时返回空串。 */
+  function lowestRarityId(data) {
+    var list = (data && data.rarities) || []
+    var best = ''
+    var bestRank = Infinity
+    for (var i = 0; i < list.length; i++) {
+      var rk = Number(list[i].rank || 0)
+      if (rk <= bestRank) {
+        bestRank = rk
+        best = list[i].id
+      }
+    }
+    return best
+  }
+
+  /**
+   * 追梦模式下这一档用哪套工艺概率（追梦池里三档都上调：40/10/1）。
+   * 池子没配就退回全局那套。
+   */
+  function dreamFoilRates(data, pool) {
+    var cfg = (data && data.settings && data.settings.foils) || {}
+    var base = cfg.rates || {}
+    var d = dreamConfig(pool) || {}
+    var over = d.foilRates && typeof d.foilRates === 'object' ? d.foilRates : null
+    if (!over) return base
+    var out = {}
+    for (var i = 0; i < FOIL_IDS.length; i++) {
+      var id = FOIL_IDS[i]
+      var v = over[id] === undefined ? base[id] : over[id]
+      out[id] = Number.isFinite(Number(v)) ? Number(v) : Number(base[id] || 0)
+    }
+    return out
+  }
+
+  /**
+   * 抽完之后追梦计数变成什么（**纯函数**，逐张按顺序判定）。
+   *   抽到 SP -> 归零（用户要求「抽到 SP 卡之后重置概率」）
+   *   没抽到   -> +1，封顶 cap（用户要求「最多计算 75 次」）
+   */
+  function dreamStepsAfter(data, pool, steps, results) {
+    var d = dreamConfig(pool) || {}
+    var cap = Math.max(0, Math.floor(Number(d.spMaxSteps === undefined ? 75 : d.spMaxSteps) || 0))
+    var spId = topRarityId(data)
+    var k = Math.max(0, Math.min(cap, Math.floor(Number(steps) || 0)))
+    for (var i = 0; i < (results || []).length; i++) {
+      var rid = results[i] && results[i].rarityId
+      if (spId && rid === spId) k = 0
+      else k = Math.min(cap, k + 1)
+    }
+    return { steps: k, cap: cap, reset: k === 0 }
+  }
+
+  /**
+   * 追梦池的**长期平均出率**（解析解，不是模拟）。
+   *
+   * 为什么需要它：追梦池的概率是随次数变化的马尔可夫过程（抽到 SP 就回到 0），
+   * 所以「标称 2.5%」只在第 0 次成立。要知道长期实际出率是多少，
+   * 得算这个链的平稳分布 —— 有了它，「实测概率 vs 标称概率」那条自检
+   * 才有一个**正确的比较基准**（否则会拿一个逐次变化的瞬时值去比平均值，
+   * 得出一堆假偏差）。
+   *
+   * 做法：状态 k = 已连续未出 SP 的次数（0..cap），
+   *   转移：以 p(k) 出 SP -> 回到 0；否则 -> min(k+1, cap)。
+   *   迭代 πP 若干轮得到平稳分布，再对每个档位求期望。
+   */
+  function dreamLongRunRates(data, pool) {
+    var d = dreamConfig(pool)
+    if (!d) return null
+    var cap = Math.max(0, Math.floor(Number(d.spMaxSteps === undefined ? 75 : d.spMaxSteps) || 0))
+    var states = cap + 1
+    var base = dreamWeights(data, pool, 0).weights
+    var total = 0
+    for (var rid in base) if (Object.prototype.hasOwnProperty.call(base, rid)) total += Number(base[rid] || 0)
+    if (!(total > 0)) return null
+    // 每个状态的「出 SP 概率」（权重占比口径）
+    var spId = topRarityId(data)
+    var p = []
+    for (var k = 0; k <= cap; k++) {
+      var w = dreamWeights(data, pool, k).weights
+      var sum = 0
+      for (var r2 in w) if (Object.prototype.hasOwnProperty.call(w, r2)) sum += Number(w[r2] || 0)
+      p.push(sum > 0 ? Number(w[spId] || 0) / sum : 0)
+    }
+    var pi = []
+    for (var i = 0; i < states; i++) pi.push(1 / states)
+    // 迭代到平稳（cap 只有几十，几百轮就非常接近了；不写线性求解器免得引误差）
+    for (var iter = 0; iter < 4000; iter++) {
+      var next = []
+      for (var j = 0; j < states; j++) next.push(0)
+      for (var s = 0; s < states; s++) {
+        next[0] += pi[s] * p[s]
+        var to = Math.min(s + 1, cap)
+        next[to] += pi[s] * (1 - p[s])
+      }
+      pi = next
+    }
+    var rates = {}
+    var ids = []
+    for (var r3 in base) if (Object.prototype.hasOwnProperty.call(base, r3)) ids.push(r3)
+    for (var a = 0; a < ids.length; a++) rates[ids[a]] = 0
+    for (var s2 = 0; s2 <= cap; s2++) {
+      var w2 = dreamWeights(data, pool, s2).weights
+      var tot2 = 0
+      for (var r4 in w2) if (Object.prototype.hasOwnProperty.call(w2, r4)) tot2 += Number(w2[r4] || 0)
+      if (!(tot2 > 0)) continue
+      for (var r5 in w2) {
+        if (!Object.prototype.hasOwnProperty.call(w2, r5)) continue
+        rates[r5] += pi[s2] * (Number(w2[r5] || 0) / tot2)
+      }
+    }
+    // 回到「每 100 抽几次」的口径，和 rateTable 一致
+    var out = {}
+    for (var r6 in rates) if (Object.prototype.hasOwnProperty.call(rates, r6)) out[r6] = rates[r6] * 100
+    // 平均多少抽出一张 SP：先算前 cap+1 抽，剩下的按封顶概率 p[cap] 的几何分布
+    var e = 0
+    var surv = 1
+    for (var t = 0; t <= cap; t++) {
+      e += surv * (t + 1) * p[t]
+      surv *= 1 - p[t]
+    }
+    if (surv > 0 && p[cap] > 0) e += surv * (cap + 1 + 1 / p[cap])
+    return { rates: out, steps: cap, spId: spId, expectedDrawsPerSp: e }
+  }
+
+  /**
+   * 一次抽卡的**价格**（不只是数字，还要说是哪种资源）：
+   *   · 普通模式 -> **点数**（用户 2026-09-18：「普通卡池的抽取改为需要消耗抽卡次数，
+   *     每天登陆赠送 300 点数，每一个点数可以进行一次普通抽卡」）
+   *   · 追梦模式 -> **抽卡券**（池子自己的票价）
+   * @returns {{amount:number, currency:'points'|'tickets', name:string}}
+   */
+  function priceFor(data, count, opts) {
+    opts = opts || {}
+    var n = Math.max(1, Number(count) || 1)
+    if (opts.dream && dreamConfig(opts.pool)) {
+      var d = dreamConfig(opts.pool)
+      var c = d.cost && typeof d.cost === 'object' ? d.cost : {}
+      var single = Number(c.single === undefined ? 1 : c.single)
+      var ten = c.ten === undefined || c.ten === null ? null : Number(c.ten)
+      if (!Number.isFinite(single) || single < 0) single = 1
+      var amount = n >= 10 && ten !== null && Number.isFinite(ten) && ten >= 0 ? ten : single * n
+      return { amount: amount, currency: 'tickets', name: '抽卡券' }
+    }
     var pull = (data && data.settings && data.settings.pull) || {}
-    var single = Number(pull.costSingle || 0)
-    var ten = pull.costTen === null || pull.costTen === undefined ? null : Number(pull.costTen)
-    if (Number(count) >= 10 && ten !== null && Number.isFinite(ten)) return ten
-    return single * Math.max(1, Number(count) || 1)
+    var si = Number(pull.costSingle || 0)
+    var t = pull.costTen === null || pull.costTen === undefined ? null : Number(pull.costTen)
+    var amt = n >= 10 && t !== null && Number.isFinite(t) ? t : si * n
+    return { amount: Math.max(0, amt), currency: 'points', name: '点数' }
+  }
+
+  /** 兼容旧签名：只回数字（amount）。新代码请用 priceFor（它还会告诉你是哪种资源）。 */
+  function costFor(data, count, opts) {
+    return priceFor(data, count, opts).amount
+  }
+
+  /**
+   * 今日的每日赠送（**纯函数**，不改任何东西）。
+   *
+   * 规则：每天（本地日期）第一次打开页面时送 `settings.daily.points` 点，
+   * 一天只送一次 —— 判定靠 `player.lastGift` 这个 `YYYY-MM-DD` 字符串。
+   *
+   * @param {string} today `YYYY-MM-DD`（由调用方按**本地时区**算好传进来）
+   * @returns {{ok:boolean, points:number, date:string, reason?:string}}
+   */
+  function dailyGift(data, today) {
+    var cfg = (data && data.settings && data.settings.daily) || {}
+    if (cfg.enabled === false) return { ok: false, points: 0, date: '', reason: '每日赠送已关闭' }
+    var amount = Math.max(0, Math.floor(Number(cfg.points === undefined ? 300 : cfg.points)))
+    if (!(amount > 0)) return { ok: false, points: 0, date: '', reason: '赠送点数是 0' }
+    var day = String(today || '')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { ok: false, points: 0, date: '', reason: '日期格式不对' }
+    var p = (data && data.player) || {}
+    if (String(p.lastGift || '') === day) return { ok: false, points: 0, date: day, reason: '今天已经领过了' }
+    return { ok: true, points: amount, date: day }
+  }
+
+  /** 本地时区的 `YYYY-MM-DD`（每日赠送按本地日期算，不能用 UTC —— 那会在晚上 8 点换日） */
+  function localDateStr(now) {
+    var d = now ? new Date(now) : new Date()
+    var p = function (n) {
+      return (n < 10 ? '0' : '') + n
+    }
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
   }
 
   /** 卡池概况：每档多少张、总共有多少张可抽。给「卡池一览」用。 */
@@ -678,13 +952,26 @@
    *
    * 注意：只对**池子里真的有卡**的档位归一化 —— 配了权重但没卡的档位
    * 实际出率是 0，按它参与归一化会把别的档位算得偏低。
+   *
+   * @param {object} [opts] `{ dream, steps }`：追梦模式要按**当前次数**算，
+   *   否则显示的还是一开始的 2.5%（而实际已经在涨了）。
    */
-  function rateTable(data, poolId) {
+  function rateTable(data, poolId, opts) {
+    opts = opts || {}
     var summary = poolSummary(data, poolId)
+    var weightOf = function (rid) {
+      if (opts.dream && dreamConfig(summary.pool)) {
+        var steps = opts.steps === undefined ? dreamSteps(data, poolId) : opts.steps
+        return Number(dreamWeights(data, summary.pool, steps).weights[rid] || 0)
+      }
+      return summary.pool && summary.pool.weights ? Number(summary.pool.weights[rid] || 0) : 0
+    }
     var totalW = 0
     var i
     for (i = 0; i < summary.rows.length; i++) {
-      if (summary.rows[i].count > 0 && summary.rows[i].weight > 0) totalW += summary.rows[i].weight
+      var w = weightOf(summary.rows[i].rarity.id)
+      summary.rows[i].weight = w
+      if (summary.rows[i].count > 0 && w > 0) totalW += w
     }
     var out = []
     for (i = 0; i < summary.rows.length; i++) {
@@ -701,18 +988,109 @@
     return out
   }
 
+  /**
+   * 跑一批模拟抽卡，统计**实测出率**（档位 + 工艺）。
+   *
+   * 这是「检测真实概率是否与标称概率一致」的那把尺子：
+   * 页面后台的概率自检用它，测试也用它（同一份实现，不然两边会给出不同的结论）。
+   *
+   * 追梦模式下**按真实过程推进计数**（抽到 SP 归零、否则 +1、封顶），
+   * 所以这里量到的就是玩家实际会遇到的分布 —— 要跟它比的是
+   * `dreamLongRunRates` 的解析长期平均，而不是「第 0 次的 2.5%」。
+   */
+  function simulate(data, opts) {
+    opts = opts || {}
+    var draws = Math.max(1, Math.min(2000000, Math.floor(Number(opts.draws) || 10000)))
+    var batch = Math.max(1, Math.min(10, Math.floor(Number(opts.count) || 10)))
+    var rng = opts.rng || mulberry32((Number(opts.seed) || 12345) >>> 0)
+    var steps = Math.max(0, Math.floor(Number(opts.steps) || 0))
+    var dreamOn = !!opts.dream
+    /** 固定某个追梦次数不推进（测「第 k 次的瞬时概率」时用） */
+    var freezeSteps = !!opts.freezeSteps
+    var rarity = {}
+    var finish = {}
+    var done = 0
+    var spHits = 0
+    var spId = topRarityId(data)
+    while (done < draws) {
+      var n = Math.min(batch, draws - done)
+      var res = drawMany(data, { poolId: opts.poolId, count: n, rng: rng, dream: dreamOn, dreamSteps: steps })
+      if (!res.ok) return { ok: false, error: res.error }
+      for (var i = 0; i < res.results.length; i++) {
+        var one = res.results[i]
+        rarity[one.rarityId] = Number(rarity[one.rarityId] || 0) + 1
+        if (one.rarityId === spId) spHits++
+        var f = one.finish || ''
+        finish[f] = Number(finish[f] || 0) + 1
+      }
+      done += res.results.length
+      // 追梦计数按真实过程推进（这才是玩家实际遇到的分布）。
+      // `freezeSteps` 用来测**某一个次数下的瞬时概率** —— 那时候要把它按住不动。
+      if (dreamOn && !freezeSteps && res.dreamSteps !== null && res.dreamSteps !== undefined) steps = res.dreamSteps
+    }
+    var rate = {}
+    var ids = []
+    for (var rid in rarity) ids.push(rid)
+    for (var k = 0; k < ids.length; k++) rate[ids[k]] = (rarity[ids[k]] / done) * 100
+    var foilRate = {}
+    for (var k2 in finish) foilRate[k2 === '' ? 'none' : k2] = (finish[k2] / done) * 100
+    return {
+      ok: true,
+      draws: done,
+      rarityCount: rarity,
+      rarityRate: rate,
+      finishCount: finish,
+      finishRate: foilRate,
+      spHits: spHits,
+      drawsPerSp: spHits > 0 ? done / spHits : Infinity,
+      steps: steps,
+    }
+  }
+
+  /**
+   * 把「实测」与「标称」摆在一起，给出偏差与是否在容差内。
+   *
+   * 容差取 **3σ + 0.3 个百分点**：σ 是二项分布的标准差
+   * （`sqrt(p(1-p)/n)`），加 0.3pp 是为了让极小概率档位
+   *（比如 0.5% 的红碎）不会因为 σ 太小而被无意义的抖动判失败。
+   */
+  function compareRates(measured, expectedPct, draws) {
+    var out = []
+    for (var id in expectedPct) {
+      if (!Object.prototype.hasOwnProperty.call(expectedPct, id)) continue
+      var p = Number(expectedPct[id] || 0) / 100
+      var got = Number(measured[id] === undefined ? 0 : measured[id])
+      var sigma = draws > 0 ? Math.sqrt(Math.max(0, p * (1 - p)) / draws) * 100 : 0
+      var tol = 3 * sigma + 0.3
+      var diff = got - Number(expectedPct[id] || 0)
+      out.push({
+        id: id,
+        expected: Number(expectedPct[id] || 0),
+        measured: got,
+        diff: diff,
+        tolerance: tol,
+        ok: Math.abs(diff) <= tol,
+      })
+    }
+    return out
+  }
+
   var api = {
     issues: issues,
     drawSingle: drawSingle,
     drawMany: drawMany,
     draw: drawSingle,
     costFor: costFor,
+    priceFor: priceFor,
+    dailyGift: dailyGift,
+    localDateStr: localDateStr,
     poolSummary: poolSummary,
     rateTable: rateTable,
     mulberry32: mulberry32,
     cryptoRandom: cryptoRandom,
     // SP 保底：给页面显示状态用，也给测试直接断言这套规则
     topRarityId: topRarityId,
+    lowestRarityId: lowestRarityId,
     spPityActive: spPityActive,
     spPityAfter: spPityAfter,
     spExclusions: spExclusions,
@@ -722,6 +1100,17 @@
     foilAllowed: foilAllowed,
     foilRoll: foilRoll,
     foilsAfter: foilsAfter,
+    // 追梦池（动态概率）
+    dreamConfig: dreamConfig,
+    dreamAvailable: dreamAvailable,
+    dreamSteps: dreamSteps,
+    dreamWeights: dreamWeights,
+    dreamFoilRates: dreamFoilRates,
+    dreamStepsAfter: dreamStepsAfter,
+    dreamLongRunRates: dreamLongRunRates,
+    // 概率自检
+    simulate: simulate,
+    compareRates: compareRates,
   }
 
   root.Gacha = api

@@ -92,6 +92,8 @@
     foilView: 'gacha.foilview.v1',
     /** 选中的卡池（读者偏好：刷新之后要还在，否则「我选了群友池」会白选） */
     pool: 'gacha.pool.v1',
+    /** 哪些卡池切到了「追梦池」模式（读者偏好；花券的是读者，所以由他决定） */
+    dream: 'gacha.dream.v1',
   }
 
   var state = {
@@ -118,6 +120,8 @@
     foilView: {},
     /** 图鉴的工艺筛选：'' = 全部，否则只看拥有这门工艺的卡 */
     foilFilter: '',
+    /** 哪些卡池切到了追梦池模式：`{ 卡池id: true }`（读者偏好） */
+    dreamPools: {},
     /** 在大图里换过工艺、图鉴格子还没跟上（关弹层时要重画一次） */
     foilViewDirty: false,
     /** 大图弹层当前显示的卡 id */
@@ -504,7 +508,18 @@
    */
   function applyStateToSnapshot(patch) {
     if (!state.data) return
-    if (!state.data.player || typeof state.data.player !== 'object') state.data.player = {}
+    /*
+     * ⚠️ 快照里**没有** player 时（静态站），先把**本机完整状态**放进去，再打补丁。
+     *
+     * 不能只放 patch 里那几个字段 —— 那会造出一个「残缺的 player」，而 `player()`
+     * 只要看到快照里有 player 就认它（那条判断是用来分「动态站/静态站」的），
+     * 于是本机状态被半张空表遮住：抽卡全部判成新卡、保底开关读不到、碎片永远 0。
+     * 实测就是这么炸的：每日赠送往快照里写了 points/lastGift 两个字段，
+     * 之后所有抽卡都变成「新卡」（SP 保底那几条断言一起红）。
+     */
+    if (!state.data.player || typeof state.data.player !== 'object') {
+      state.data.player = localState()
+    }
     var p = state.data.player
     if (patch.owned) p.owned = patch.owned
     if (patch.shards) p.shards = patch.shards
@@ -514,6 +529,12 @@
     if (patch.history) p.history = patch.history
     if (patch.spPity) p.spPity = patch.spPity
     if (patch.foils) p.foils = patch.foils
+    // 追梦计数与券数：追梦池要靠它算「SP 涨到多少了」，换券之后券数也要立刻可见
+    if (patch.dream) p.dream = patch.dream
+    if (patch.currency !== undefined) p.currency = Number(patch.currency || 0)
+    // 点数（普通抽卡次数）与「今天领过每日赠送没有」
+    if (patch.points !== undefined) p.points = Number(patch.points || 0)
+    if (patch.lastGift !== undefined) p.lastGift = String(patch.lastGift || '')
   }
 
   /**
@@ -537,6 +558,11 @@
         sinceTop: Number(p.sinceTop || 0),
         spPity: p.spPity || {},
         foils: p.foils || {},
+        dream: p.dream || {},
+        currency: Number(p.currency || 0),
+        currencyName: p.currencyName || '抽卡券',
+        points: Number(p.points || 0),
+        lastGift: String(p.lastGift || ''),
       }),
     })
   }
@@ -592,6 +618,104 @@
     if (!pools.length) return null
     for (var i = 0; i < pools.length; i++) if (pools[i].id === state.poolId) return pools[i]
     return pools[0]
+  }
+
+  // -------------------------------------------------------------------------
+  // 追梦池（用户要求：给现有卡池加一个「追梦池」切换项）
+  // -------------------------------------------------------------------------
+  //
+  // 它是**每个池子上的开关**，不是第三个池子：切过去之后出率换成另一套、
+  // 工艺概率上调、并且要花抽卡券；切回来依旧免费。
+  // 「哪些池子开着」是**读者偏好**（存在他自己浏览器里），因为花的是他的券。
+
+  /** 这个池子能不能切追梦模式（看池子上的 dream 配置） */
+  function dreamAvailable(pool) {
+    var g = G()
+    if (!g || typeof g.dreamAvailable !== 'function') return false
+    return g.dreamAvailable(pool)
+  }
+
+  /** 当前池子现在是不是追梦模式 */
+  function dreamOn(pool) {
+    if (!pool || !dreamAvailable(pool)) return false
+    return !!(state.dreamPools || {})[pool.id]
+  }
+
+  function setDreamOn(poolId, on) {
+    var m = Object.assign({}, state.dreamPools || {})
+    if (on) m[poolId] = true
+    else delete m[poolId]
+    state.dreamPools = m
+    lsSet(LS.dream, m)
+  }
+
+  /** 追梦计数（玩家状态：`player.dream[poolId]`） */
+  function dreamSteps(poolId) {
+    var p = player()
+    var m = (p && p.dream) || {}
+    var raw = Number(m[poolId])
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0
+  }
+
+  /** 这一池当前的追梦信息（权重 / 次数 / 上限 / SP 档位）—— 拿不到就返回 null */
+  function dreamInfo(pool) {
+    var g = G()
+    if (!g || !pool || !dreamOn(pool)) return null
+    var d = g.dreamWeights(state.data, pool, dreamSteps(pool.id))
+    return d
+  }
+
+  /** 这个池子一次抽卡要花什么（追梦模式花券、普通模式花点数） */
+  function drawPrice(count, pool) {
+    var g = G()
+    if (!g || !g.priceFor) return { amount: 0, currency: 'points', name: '点数' }
+    return g.priceFor(state.data, count, { pool: pool, dream: dreamOn(pool) })
+  }
+
+  function drawCost(count, pool) {
+    return drawPrice(count, pool).amount
+  }
+
+  /** 点数（普通抽卡用的次数） */
+  function points() {
+    var p = player()
+    return Math.max(0, Number((p && p.points) || 0))
+  }
+
+  /** 抽卡券（追梦池用的） */
+  function tickets() {
+    var p = player()
+    return Math.max(0, Number((p && p.currency) || 0))
+  }
+
+  /**
+   * 每日赠送：每天第一次打开页面送 300 点（用户要求）。
+   *
+   * 判定用**本地日期**（`YYYY-MM-DD`），存在 `player.lastGift`；
+   * 规则本身在 draw.js 的 `dailyGift`（纯函数，服务端也用同一份）。
+   */
+  function claimDailyGift() {
+    var g = G()
+    if (!g || !g.dailyGift || READONLY === undefined) return null
+    var today = g.localDateStr ? g.localDateStr() : ''
+    var check = g.dailyGift(dataWithState(), today)
+    if (!check.ok) return null
+    var local = localState()
+    local.points = Math.max(0, Number(local.points || 0)) + check.points
+    local.lastGift = today
+    saveLocal(local)
+    applyStateToSnapshot({ points: local.points, lastGift: local.lastGift })
+    // 动态站：把「今天领过了」也落到服务端，否则刷新一次又能领
+    if (BACKEND && state.unlocked) {
+      request('/player/gift', { method: 'POST', body: { date: today, points: check.points } })
+        .then(function (res) {
+          if (res && res.player && state.data) state.data.player = res.player
+        })
+        .catch(function (err) {
+          console.warn('[gacha] 每日赠送同步失败（点数已记在本机）：', err && err.message)
+        })
+    }
+    return check
   }
 
   /**
@@ -1330,6 +1454,9 @@
 
     var r = rarityById(card.rarity)
     if (r && r.color) box.style.setProperty('--rarity-color', r.color)
+    // 逐卡比例覆盖（纪念卡是 3:2 横版，其余卡走全局的 2:3）。
+    // 走 CSSOM 而不是内联 style 属性 —— CSP 会静默丢掉后者。
+    if (card.ratio) box.style.setProperty('--card-ratio', card.ratio)
 
     var face = el('div', { class: 'card-face' })
     // 占位层（永远先放）
@@ -1380,6 +1507,10 @@
       if (finish === 'shatter') face.appendChild(el('span', { class: 'foil-shards', 'aria-hidden': 'true' }))
       face.appendChild(el('span', { class: 'foil-glare', 'aria-hidden': 'true' }))
       if (finish === 'shatter') face.appendChild(el('span', { class: 'foil-sparks', 'aria-hidden': 'true' }))
+      // 小图上没人会去悬停/拖动，所以**自动**每 5 秒扫一道条形光（用户要求），
+      // 让图鉴、抽卡结果、抽卡动画里的闪卡自己把质感显出来。
+      // 大图（.card-dialog-card）不走这条路：那里是拖动检视，光由手指给。
+      face.appendChild(el('span', { class: 'foil-sweep', 'aria-hidden': 'true' }))
     }
     box.appendChild(face)
 
@@ -1465,18 +1596,29 @@
       return
     }
 
-    var cost = g.costFor(data, count)
+    var on = dreamOn(pool)
+    var price = drawPrice(count, pool)
     var p = player()
-    var have = Number(p.currency || 0)
-    if (cost > 0 && have < cost) {
-      toast('不够 ' + (p.currencyName || '抽卡券') + '：需要 ' + cost + '，现有 ' + have, 'error')
+    var have = price.currency === 'tickets' ? tickets() : points()
+    if (price.amount > 0 && have < price.amount) {
+      toast(
+        price.name + '不够：需要 ' + price.amount + '，现有 ' + have +
+          (on ? '（追梦池花抽卡券，到「碎片兑换」用碎片换）' : '（点数每天登陆会送）'),
+        'error'
+      )
       return
     }
+    var cost = price.amount
 
     // ⚠️ 这里必须传 dataWithState() 而不是 state.data：SP 保底要看**已拥有**哪些卡，
     // 而静态站的快照里没有 player（状态在 localStorage 里）——
     // 传 state.data 会让保底永远算成「一张都没拥有」，开关永远打不开。
-    var result = g.drawMany(dataWithState(), { poolId: pool.id, count: count })
+    var result = g.drawMany(dataWithState(), {
+      poolId: pool.id,
+      count: count,
+      dream: on,
+      dreamSteps: dreamSteps(pool.id),
+    })
     if (!result.ok) {
       toast('抽卡失败：' + result.error, 'error')
       renderDrawProblem([result.error], pool)
@@ -1495,7 +1637,9 @@
       toast('shards.js 没有加载成功，碎片结算无法进行（看 Console 的报错）', 'error')
       return
     }
-    var settle = sh.settleDraw(dataWithState(), result.results)
+    // 追梦池的重复卡**不返碎片、改返点数**（用户要求：不论品质 1 点，
+    // 平闪/全闪/红碎额外 +1/+2/+5）—— 规则在 shards.js，两条路共用同一份。
+    var settle = sh.settleDraw(dataWithState(), result.results, { reward: on ? 'points' : 'shards' })
 
     // 保底计数（自上次出最高档起算）
     var topId = topRarity() ? topRarity().id : ''
@@ -1507,7 +1651,16 @@
 
     // --- 落本地（静态站靠它；动态站也写一份，作为同步失败时的兜底） --------
     var local = localState()
-    local.currency = Math.max(0, Number(local.currency || 0) - cost)
+    // 花的是点数还是券，由 priceFor 说了算（普通池点数、追梦池抽卡券）
+    if (price.currency === 'tickets') {
+      local.currency = Math.max(0, Number(local.currency || 0) - cost)
+    } else {
+      local.points = Math.max(0, Number(local.points || 0) - cost)
+    }
+    // 追梦池的重复卡返点数
+    if (settle.gainedPoints > 0) {
+      local.points = Math.max(0, Number(local.points || 0)) + Number(settle.gainedPoints)
+    }
     local.pulls = Number(local.pulls || 0) + result.results.length
     local.sinceTop = sinceTop
     local.owned = settle.owned
@@ -1529,6 +1682,17 @@
         ? G2.foilsAfter(local.foils || {}, result.results)
         : Object.assign({}, local.foils || {})
 
+    // 追梦计数：结论同样由 draw.js 的纯函数给出（抽到 SP 归零，否则 +1、封顶）
+    var dreamAfterSteps = null
+    if (on) {
+      local.dream = Object.assign({}, local.dream || {})
+      dreamAfterSteps = result.dreamSteps === null || result.dreamSteps === undefined
+        ? dreamSteps(pool.id)
+        : Number(result.dreamSteps)
+      if (dreamAfterSteps > 0) local.dream[pool.id] = dreamAfterSteps
+      else delete local.dream[pool.id]
+    }
+
     var at = Date.now()
     var rows = settle.perCard.map(function (pc, idx) {
       return {
@@ -1538,6 +1702,10 @@
         index: local.pulls - settle.perCard.length + idx + 1,
         duplicate: pc.duplicate,
         shards: pc.shards,
+        // 追梦池返的是点数（普通池返碎片）—— 记录页两种都要能显示
+        points: pc.points,
+        // 这一抽来自普通池还是追梦池：记录页要能把两者分开（用户要求）
+        dream: !!on,
         guaranteed: !!(result.results[idx] && result.results[idx].guaranteed),
         // 这一张的工艺（空串 = 普通）—— 记录页要能标出「这张是闪的」
         finish: foilId(result.results[idx] && result.results[idx].finish),
@@ -1558,6 +1726,10 @@
       history: local.history,
       spPity: local.spPity,
       foils: local.foils,
+      dream: local.dream,
+      currency: local.currency,
+      points: local.points,
+      lastGift: local.lastGift,
     })
 
     // --- 展示用的本轮结果 ------------------------------------------------
@@ -1598,7 +1770,8 @@
     var toastText =
       settle.duplicates > 0
         ? (count > 1 ? '十连完成' : '抽到 ' + result.results[0].card.name) +
-          ' · ' + settle.duplicates + ' 张重复，转化为 ' + shardTotal + ' 个碎片'
+          ' · ' + settle.duplicates + ' 张重复，返还 ' +
+          (on ? settle.gainedPoints + ' 点' : shardTotal + ' 个碎片')
         : count > 1
         ? '十连完成 · 全部是新卡！'
         : '抽到新卡 ' + result.results[0].card.name
@@ -1610,6 +1783,18 @@
       if (fid) foilHit = fid
     }
     if (foilHit) toastText += ' · 特殊工艺：' + foilLabel(foilHit)
+
+    // 追梦池：把「SP 涨到多少 / 刚刚重置」说出来 ——
+    // 这套机制不写在脸上就等于不存在（读者只会觉得「概率好像不太对」）
+    if (on && dreamAfterSteps !== null) {
+      var dInfoAfter = g.dreamWeights(state.data, pool, dreamAfterSteps)
+      var spLbl = (rarityById(dInfoAfter.spId) || {}).label || dInfoAfter.spId
+      toastText +=
+        ' · 追梦池：' +
+        (dreamAfterSteps === 0
+          ? '抽到 ' + spLbl + '，概率已重置'
+          : spLbl + ' 概率已累计 ' + dreamAfterSteps + '/' + dInfoAfter.cap + ' 次（' + fmtRate(dInfoAfter.weights[dInfoAfter.spId] / 100) + '）')
+    }
 
     /**
      * 动画放完（或没开动画时立刻）才渲染结果视图。
@@ -1666,9 +1851,16 @@
         body: {
           poolId: pool.id,
           cost: cost,
+          // 花的是哪种资源：普通池是点数、追梦池是抽卡券。
+          // 服务端只记账，所以必须由前端说清扣哪一边（默认按券算，兼容老前端）。
+          costCurrency: price.currency,
+          reward: on ? 'points' : 'shards',
           sinceTop: sinceTop,
           // SP 保底开关按池子记，服务端没有别的来源 —— 整张表送上去
           spPity: local.spPity,
+          // 追梦计数同理（服务端不判抽卡，只记账）
+          dream: local.dream || {},
+          mode: on ? 'dream' : 'normal',
           results: result.results.map(function (item) {
             return { cardId: item.card.id, finish: foilId(item.finish) }
           }),
@@ -1688,6 +1880,8 @@
             l2.shards = res.player.shards || l2.shards
             l2.duplicates = Number(res.player.duplicates || 0)
             if (res.player.foils) l2.foils = res.player.foils
+            if (res.player.points !== undefined) l2.points = Number(res.player.points || 0)
+            if (res.player.currency !== undefined) l2.currency = Number(res.player.currency || 0)
             saveLocal(l2)
             render()
           }
@@ -1787,33 +1981,59 @@
 
     // 抽卡键：**放在主视觉外面**的一行（用户要求：不要压在封面卡片上）。
     // 主视觉保持 16:9 完整可见，按钮排在它下面、右对齐。
-    var cost1 = state.data.settings.pull.costSingle
-    var cost10 = g.costFor(state.data, 10)
-    var have = Number(player().currency || 0)
+    var on = dreamOn(pool)
+    var price1 = drawPrice(1, pool)
+    var price10 = drawPrice(10, pool)
+    var cost1 = price1.amount
+    var cost10 = price10.amount
+    // 两种资源分开看：普通花点数、追梦花券
+    var havePoints = points()
+    var haveTickets = tickets()
+    var haveFor = function (cur) { return cur === 'tickets' ? haveTickets : havePoints }
     var disabled = probs.length > 0
+    // 按钮上写的是这一档要花什么（普通=点数、追梦=抽卡券）
+    var curName = price1.name
 
     var actions = el('div', { class: 'draw-actions' }, [
-      el('button', {
-        class: 'btn draw-btn draw-btn-primary',
-        type: 'button',
-        'data-bind': 'draw1',
-        disabled: disabled || undefined,
-      }, [
-        el('span', { class: 'draw-btn-label', text: '单抽' }),
-        el('span', { class: 'draw-btn-cost', text: cost1 ? '×' + cost1 : '免费' }),
+      // 模式切换：普通（花点数）/ 追梦池（花抽卡券、概率换一套）
+      dreamSwitch(pool),
+      el('div', { class: 'draw-action-btns' }, [
+        el('button', {
+          class: 'btn draw-btn draw-btn-primary',
+          type: 'button',
+          'data-bind': 'draw1',
+          disabled: disabled || undefined,
+        }, [
+          el('span', { class: 'draw-btn-label', text: '单抽' }),
+          el('span', { class: 'draw-btn-cost', text: cost1 ? curName + ' ×' + cost1 : '免费' }),
+        ]),
+        el('button', {
+          class: 'btn draw-btn',
+          type: 'button',
+          'data-bind': 'draw10',
+          disabled: disabled || undefined,
+        }, [
+          el('span', { class: 'draw-btn-label', text: '十连' }),
+          el('span', { class: 'draw-btn-cost', text: cost10 ? curName + ' ×' + cost10 : '免费' }),
+        ]),
       ]),
-      el('button', {
-        class: 'btn draw-btn',
-        type: 'button',
-        'data-bind': 'draw10',
-        disabled: disabled || undefined,
-      }, [
-        el('span', { class: 'draw-btn-label', text: '十连' }),
-        el('span', { class: 'draw-btn-cost', text: cost10 ? '×' + cost10 : '免费' }),
-      ]),
+      // 不够时先说清楚，别让人点下去只看到一句「不够」
+      cost1 > haveFor(price1.currency)
+        ? el('div', {
+            class: 'dream-warn',
+            text:
+              curName + '不够（现有 ' + haveFor(price1.currency) + '，单抽要 ' + cost1 + '）—— ' +
+              (on ? '到「碎片兑换」把碎片换成抽卡券。' : '点数每天登陆会送，也可以在追梦池抽到重复卡时返还。'),
+          })
+        : null,
     ])
-    // 现有券数压在主视觉左下角（小胶囊，不是按钮）
-    banner.appendChild(el('span', { class: 'banner-have', text: '现有 ' + have + ' ' + (player().currencyName || '抽卡券') }))
+    // 现有资源压在主视觉左下角（小胶囊，不是按钮）
+    banner.appendChild(
+      el('span', {
+        class: 'banner-have',
+        text: '点数 ' + havePoints + ' · 抽卡券 ' + haveTickets,
+      })
+    )
     stage.appendChild(el('div', { class: 'draw-main' }, [banner, actions]))
     wrap.appendChild(stage)
 
@@ -1831,8 +2051,10 @@
         ])
       )
     } else {
-      // 出率表：让人在抽之前就知道各档概率
-      var rates = g.rateTable(state.data, pool.id)
+      // 出率表：让人在抽之前就知道各档概率。
+      // 追梦池的概率**随次数变化**，所以这里必须按当前次数算 ——
+      // 显示「2.5%」而实际已经涨到 5% 属于骗人。
+      var rates = g.rateTable(state.data, pool.id, { dream: on, steps: dreamSteps(pool.id) })
       wrap.appendChild(
         el('div', { class: 'rate-row' }, rates.map(function (x) {
           return el('div', { class: 'rate-cell' + (x.playable ? '' : ' rate-off') }, [
@@ -1842,9 +2064,26 @@
           ])
         }))
       )
+      // 追梦池：把「涨到多少了、还差几次封顶」写出来，否则读者看不到这套机制在跑
+      var dInfo = dreamInfo(pool)
+      if (dInfo) {
+        var spLabel = (rarityById(dInfo.spId) || {}).label || dInfo.spId
+        var fromLabel = (rarityById(dInfo.fromId) || {}).label || dInfo.fromId
+        wrap.appendChild(
+          el('div', { class: 'dream-note' }, [
+            el('span', { class: 'dream-note-key', text: '追梦池' }),
+            el('span', {
+              text:
+                '已累计 ' + dInfo.steps + ' / ' + dInfo.cap + ' 次：每抽一次 ' + spLabel + ' +0.1%、' +
+                fromLabel + ' -0.1%，抽到 ' + spLabel + ' 就重置',
+            }),
+            el('span', { class: 'dream-note-cost', text: '本池需要抽卡券（单抽 ' + cost1 + ' / 十连 ' + cost10 + '）' }),
+          ])
+        )
+      }
       // 特殊工艺的概率也要写出来：页面上多了一整套概率，不写清楚的话
       // 读者只会看到「有的卡在发光」，然后怀疑是不是显示坏了
-      var foilLine = foilRateLine()
+      var foilLine = foilRateLine(on ? '追梦池' : '')
       if (foilLine) wrap.appendChild(foilLine)
     }
 
@@ -2062,7 +2301,7 @@
     // 它按「平铺」渲染：一级头下面直接是卡，不再套一层同名的系列头。
     var plain = sortSeries(
       cards.filter(function (c) {
-        return !c.series
+        return !c.series && !c.memorial
       })
     )
     if (plain.length) {
@@ -2080,10 +2319,33 @@
       })
     }
 
+    // 纪念卡：**只**通过「清空缓存」重置存档时赠送，不进任何卡池
+    //（用户要求：无法抽卡获取）。所以它们不能被算进「没挂到卡池的卡」那个
+    // 警告组 —— 那是给「数据配错了」用的，而纪念卡不进池是**设计**。
+    var memorial = sortSeries(
+      cards.filter(function (c) {
+        return !!c.memorial
+      })
+    )
+    if (memorial.length) {
+      groups.push({
+        kind: 'pool',
+        key: 'pool:__memorial__',
+        label: '奇迹',
+        desc: '只有在「清空缓存」（重置存档）时才会赠送，无法通过抽卡获得',
+        coverUrl: '',
+        coverCard: null,
+        cover: coverOf(memorial),
+        cards: memorial,
+        children: [],
+        flat: true,
+        note: '重置存档时赠送',
+      })
+    }
     // 兜底：哪个池子都不收的卡也必须看得见 —— 否则它们会在图鉴里**静默消失**。
     // 只在数据配错时才会出现（新系列忘了挂到池子上）。
     var leftovers = cards.filter(function (c) {
-      return !inAnyPool[c.id]
+      return !inAnyPool[c.id] && !c.memorial
     })
     if (leftovers.length) {
       var warnList = sortSeries(leftovers)
@@ -2182,11 +2444,15 @@
    * 只在真的开着一门概率 > 0 的工艺时才渲染 —— 全关掉时留着这一行
    * 只会让人以为「有这个功能但我抽不到」。门槛写了个档位表里没有的档位时，
    * 这里照实把它写出来（判定那边也是「这一档出不来」）。
+   *
+   * @param {string} [variant] 非空时在标题上标出来（追梦池用的是另一套概率）
    */
-  function foilRateLine() {
+  function foilRateLine(variant) {
+    var g = G()
+    var pool = currentPool()
     var cfg = (state.data && state.data.settings && state.data.settings.foils) || {}
     if (cfg.enabled === false) return null
-    var rates = cfg.rates || {}
+    var rates = variant && g && g.dreamFoilRates ? g.dreamFoilRates(state.data, pool) : cfg.rates || {}
     var kinds = foilKinds()
     var parts = []
     for (var i = 0; i < kinds.length; i++) {
@@ -2202,9 +2468,49 @@
     }
     if (!parts.length) return null
     return el('div', { class: 'foil-rate-line' }, [
-      el('span', { class: 'foil-rate-key', text: '特殊工艺' }),
+      el('span', { class: 'foil-rate-key', text: '特殊工艺' + (variant ? ' · ' + variant : '') }),
       el('span', { text: parts.join(' / ') }),
       el('span', { class: 'foil-rate-note', text: '卡图不变，只是卡面质感不同；在图鉴里点开大图可以逐张切回原图看。' }),
+    ])
+  }
+
+  /**
+   * 「普通 / 追梦池」模式切换。
+   *
+   * 只在池子配了追梦模式时才出现（`dream.enabled: false` 的池子不显示）——
+   * 显示一个点了没反应的开关比不显示更糟。
+   * 两个按钮各自把**代价**写在脸上：普通是「免费」，追梦是「券 ×N」。
+   */
+  function dreamSwitch(pool) {
+    if (!pool || !dreamAvailable(pool)) return null
+    var on = dreamOn(pool)
+    var d = (pool.dream || {})
+    var label = d.label || '追梦池'
+    var g = G()
+    // ⚠️ 追梦那个按钮上的价格要**按追梦票价算**，不能用 drawCost()（它看当前模式，
+    // 而现在多半是普通模式 -> 会显示「券 ×0」，等于告诉读者切过去也免费）
+    var dreamPrice = g ? g.costFor(state.data, 1, { pool: pool, dream: true }) : 1
+    function modeBtn(id, text, sub, active) {
+      var b = el('button', {
+        class: 'mode-btn' + (active ? ' is-on' : ''),
+        type: 'button',
+        'data-dream-mode': id,
+        'aria-pressed': active ? 'true' : 'false',
+        title: sub,
+      }, [
+        el('span', { class: 'mode-btn-label', text: text }),
+        el('span', { class: 'mode-btn-sub', text: sub }),
+      ])
+      b.addEventListener('click', function () {
+        setDreamOn(pool.id, id === 'dream')
+        render()
+        toast(id === 'dream' ? '已切到' + label + '（消耗抽卡券）' : '已切回普通模式（免费）', 'ok')
+      })
+      return b
+    }
+    return el('div', { class: 'dream-switch', 'data-pool': pool.id }, [
+      modeBtn('normal', '普通', '免费', !on),
+      modeBtn('dream', label, '券 ×' + dreamPrice, on),
     ])
   }
 
@@ -2700,6 +3006,64 @@
       )
     }
 
+    // ---- 碎片 -> 抽卡券（用户要求 SR 5:1 / SSR 1:1 / UR 1:5 / SP 1:25）----
+    //
+    // 追梦池要花券，所以这里是券的唯一来源。**整批换**：
+    // SR 是 5:1，按单个碎片算除不尽，所以按钮是「换 1 批 / 全部换」。
+    if (typeof S.ticketStatus === 'function') {
+      var tks = S.ticketStatus(dataWithState())
+      var ticketPanel = el('div', { class: 'panel' }, [
+        el('div', { class: 'panel-title', text: '碎片 → 抽卡券' }),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '抽卡券用在「追梦池」（普通模式依旧免费）。比例：' +
+            tks.map(function (x) { return (x.label || x.rarityId) + ' ' + x.perShards + ':' + x.perTickets }).join(' / ') +
+            '。整批兑换：例如 SR 每 ' + ((tks[0] && tks[0].perShards) || 5) + ' 个碎片换 1 张券。',
+        }),
+        el('div', { class: 'ticket-rows' }, tks.map(function (x) {
+          var can = !x.disabled && x.batches > 0
+          var row = el('div', { class: 'ticket-row', 'data-rarity': x.rarityId }, [
+            rarityChip(x.rarityId),
+            el('span', { class: 'ticket-have', text: fmt(x.have) + ' 个' }),
+            el('span', { class: 'ticket-arrow', text: '→' }),
+            el('span', { class: 'ticket-gain', text: can ? fmt(x.ticketsGain) + ' 张券' : '0 张' }),
+            el('span', {
+              class: 'ticket-hint' + (can ? '' : ' ticket-hint-off'),
+              text: x.disabled
+                ? '这一档不开放兑换'
+                : can
+                ? '可换 ' + x.batches + ' 批'
+                : '还差 ' + x.missing + ' 个（' + x.perShards + ' 个换 ' + x.perTickets + ' 张）',
+            }),
+          ])
+          var one = el('button', {
+            class: 'btn small',
+            type: 'button',
+            'data-ticket-action': 'one',
+            'data-rarity': x.rarityId,
+            disabled: can ? undefined : true,
+          }, ['换 1 批（' + x.perShards + ' → ' + x.perTickets + '）'])
+          var all = el('button', {
+            class: 'btn small',
+            type: 'button',
+            'data-ticket-action': 'all',
+            'data-rarity': x.rarityId,
+            disabled: can ? undefined : true,
+          }, ['全部换（→ ' + fmt(x.ticketsGain) + '）'])
+          var actions = el('div', { class: 'ticket-actions' }, [one, all])
+          var box = el('div', { class: 'ticket-item' }, [row, actions])
+          return box
+        })),
+        el('p', {
+          class: 'panel-hint',
+          text: '现有 ' + fmt(player().currency || 0) + ' ' + (player().currencyName || '抽卡券') + '。' +
+            (READONLY ? '静态站上这些都记在你这台浏览器里。' : ''),
+        }),
+      ])
+      wrap.appendChild(ticketPanel)
+    }
+
     status.forEach(function (row) {
       var body = el('div', { class: 'shard-row' }, [
         rarityChip(row.rarity.id, { big: true }),
@@ -2785,6 +3149,238 @@
         doExchange(btn.getAttribute('data-rarity'), action)
       })
     })
+
+    // 碎片 -> 抽卡券
+    view.querySelectorAll('[data-ticket-action]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var rarityId = btn.getAttribute('data-rarity')
+        var S2 = window.GachaShards
+        var rows = S2 && S2.ticketStatus ? S2.ticketStatus(dataWithState()) : []
+        var row = null
+        for (var i = 0; i < rows.length; i++) if (rows[i].rarityId === rarityId) row = rows[i]
+        if (!row) return
+        var batches = btn.getAttribute('data-ticket-action') === 'all' ? row.batches : 1
+        doTicketExchange(rarityId, batches)
+      })
+    })
+  }
+
+  /**
+   * 执行一次「碎片 -> 抽卡券」。两条通路与兑换一样：动态站走服务端（权威），
+   * 静态站本地记账。规则本身在 page/shards.js 里只有一份。
+   */
+  function doTicketExchange(rarityId, batches) {
+    var S = window.GachaShards
+    if (!S || typeof S.exchangeTickets !== 'function') {
+      toast('碎片模块没有加载，无法换券', 'error')
+      return
+    }
+    var check = S.canExchangeTickets(dataWithState(), rarityId, batches)
+    if (!check.ok) {
+      toast(check.error, 'error')
+      return
+    }
+
+    if (BACKEND) {
+      if (!state.unlocked) {
+        toast('需要先解锁编辑秘钥才能兑换（右上角「解锁」）', 'error')
+        return
+      }
+      request('/shards.json', {
+        method: 'POST',
+        body: { rarity: rarityId, action: 'ticket', batches: batches },
+      })
+        .then(function (res) {
+          if (res.player && state.data) state.data.player = res.player
+          pushTicketLog(rarityId, res.cost || check.cost, res.gain || check.gain)
+          render()
+          toast('换到 ' + (res.gain || check.gain) + ' 张' + (player().currencyName || '抽卡券'), 'ok')
+        })
+        .catch(function (err) {
+          toast('换券失败：' + err.message, 'error')
+        })
+      return
+    }
+
+    // 静态站：本地记账。**券要一起写**（只改碎片的话等于白换）
+    var result = S.exchangeTickets(dataWithState(), rarityId, batches)
+    if (!result.ok) {
+      toast(result.error, 'error')
+      return
+    }
+    var local = localState()
+    local.shards = result.shards
+    local.currency = result.currency
+    saveLocal(local)
+    applyStateToSnapshot({ shards: local.shards, currency: local.currency, owned: local.owned })
+    pushTicketLog(rarityId, result.cost, result.gain)
+    render()
+    toast('换到 ' + result.gain + ' 张' + (local.currencyName || '抽卡券') + '（记在这台浏览器上）', 'ok')
+  }
+
+  function pushTicketLog(rarityId, cost, gain) {
+    if (!state.shardLog) state.shardLog = []
+    var r = rarityById(rarityId)
+    var label = r ? r.label || r.id : rarityId
+    state.shardLog.unshift({
+      rarity: rarityId,
+      at: Date.now(),
+      text: label + ' 碎片 -' + cost + ' -> +' + gain + ' 张抽卡券',
+    })
+    state.shardLog = state.shardLog.slice(0, 30)
+  }
+
+  // -------------------------------------------------------------------------
+  // 「清空缓存」= 重置存档（用户要求：二级确认 + 等 5 秒才能确认）
+  // -------------------------------------------------------------------------
+
+  /** 第二级确认要等多久才能点「确认清除」 */
+  var RESET_WAIT_MS = 5000
+
+  /** 打开二级确认：倒计时跑完之前确认键是禁用的 */
+  function openResetDialog() {
+    var dlg = state.els.resetDialog
+    if (!dlg) return
+    var confirmBtn = state.els.resetConfirm
+    var countEl = state.els.resetCount
+    var outEl = state.els.resetOut
+    if (outEl) {
+      outEl.textContent = ''
+      outEl.className = 'panel-out'
+    }
+    if (confirmBtn) confirmBtn.disabled = true
+    if (state.resetTimer) {
+      window.clearInterval(state.resetTimer)
+      state.resetTimer = 0
+    }
+    if (countEl) countEl.hidden = false
+    var left = Math.ceil(RESET_WAIT_MS / 1000)
+    var paint = function () {
+      if (countEl) {
+        countEl.textContent = left > 0 ? '请等 ' + left + ' 秒…' : '可以确认了'
+        countEl.classList.toggle('is-ready', left <= 0)
+      }
+    }
+    paint()
+    // ⚠️ 倒计时用 setInterval 而不是「点的时候就记个时间、确认时比一下」：
+    // 后者在用户切走标签页再回来时会出现「看着能点、点下去却被拒」的怪状态。
+    state.resetTimer = window.setInterval(function () {
+      left -= 1
+      paint()
+      if (left <= 0) {
+        window.clearInterval(state.resetTimer)
+        state.resetTimer = 0
+        if (confirmBtn) confirmBtn.disabled = false
+      }
+    }, 1000)
+    showModal(dlg)
+  }
+
+  function closeResetDialog() {
+    if (state.resetTimer) {
+      window.clearInterval(state.resetTimer)
+      state.resetTimer = 0
+    }
+    hide(state.els.resetDialog)
+  }
+
+  /**
+   * 真的清空。
+   *
+   * 两条路：动态站 + 已解锁 -> 服务端权威重置（`POST api/player/reset`，
+   * 规则在 page/shards.js 的 `resetPlayer`，两边同一份）；
+   * 静态站（GitHub Pages）-> 只能本地重置（这也是线上读者的实际路径）。
+   */
+  function doReset() {
+    var S = window.GachaShards
+    var outEl = state.els.resetOut
+    var confirmBtn = state.els.resetConfirm
+    if (!S || typeof S.resetPlayer !== 'function') {
+      if (outEl) {
+        outEl.textContent = '碎片模块没加载，无法重置。'
+        outEl.className = 'panel-out panel-out-err'
+      }
+      return
+    }
+    if (confirmBtn) confirmBtn.disabled = true
+
+    var finish = function (player, gift, where) {
+      if (player && state.data) {
+        state.data.player = player
+        applyStateToSnapshot({
+          owned: player.owned,
+          shards: player.shards,
+          duplicates: player.duplicates,
+          pulls: player.pulls,
+          sinceTop: player.sinceTop,
+          history: player.history,
+          spPity: player.spPity,
+          foils: player.foils,
+          dream: player.dream,
+          currency: player.currency,
+          points: player.points,
+          lastGift: player.lastGift,
+        })
+      }
+      closeResetDialog()
+      closeCardDialog()
+      render()
+      var names = (gift || []).map(function (g) {
+        return g.card.name + (g.finish ? '（' + foilLabel(g.finish) + '）' : '')
+      })
+      toast(
+        '已清空并重置：点数 ' + Math.round(Number(player && player.points) || 0) +
+          '、抽卡券 ' + Math.round(Number(player && player.currency) || 0) +
+          (names.length ? '，赠送纪念卡：' + names.join('、') : '') +
+          (where ? '（' + where + '）' : ''),
+        'ok'
+      )
+    }
+
+    if (BACKEND) {
+      if (!state.unlocked) {
+        if (outEl) {
+          outEl.textContent = '动态站上重置需要先解锁编辑秘钥（右上角「解锁」）。静态站（GitHub Pages）可以直接重置。'
+          outEl.className = 'panel-out panel-out-err'
+        }
+        if (confirmBtn) confirmBtn.disabled = false
+        return
+      }
+      request('/player/reset', { method: 'POST', body: { confirm: true } })
+        .then(function (res) {
+          if (!res || !res.player) throw new Error('服务端没有返回新的玩家状态')
+          var l = localState()
+          l.owned = res.player.owned || {}
+          l.shards = res.player.shards || {}
+          l.duplicates = Number(res.player.duplicates || 0)
+          l.pulls = Number(res.player.pulls || 0)
+          l.sinceTop = Number(res.player.sinceTop || 0)
+          l.history = res.player.history || []
+          l.spPity = res.player.spPity || {}
+          l.foils = res.player.foils || {}
+          l.dream = res.player.dream || {}
+          l.currency = Number(res.player.currency || 0)
+          l.points = Number(res.player.points || 0)
+          l.lastGift = String(res.player.lastGift || '')
+          saveLocal(l)
+          finish(res.player, res.gift || [], '服务端已重置')
+        })
+        .catch(function (err) {
+          if (outEl) {
+            outEl.textContent = '重置失败：' + err.message
+            outEl.className = 'panel-out panel-out-err'
+          }
+          if (confirmBtn) confirmBtn.disabled = false
+        })
+      return
+    }
+
+    // 静态站：本地重置（线上读者的路径）
+    var r = S.resetPlayer(dataWithState())
+    var fresh = localState()
+    var next = Object.assign({}, fresh, r.player)
+    saveLocal(next)
+    finish(next, r.gift, '只改了这台浏览器')
   }
 
   /**
@@ -2899,8 +3495,12 @@
     var stats = {}
     var dupTotal = 0
     var shardTotal = 0
+    var dreamTotal = 0
+    var normalTotal = 0
     hist.forEach(function (h) {
       stats[h.rarity] = (stats[h.rarity] || 0) + 1
+      if (h.dream) dreamTotal++
+      else normalTotal++
       if (h.duplicate) {
         dupTotal++
         shardTotal += Number(h.shards || 0)
@@ -2919,6 +3519,9 @@
       el('div', { class: 'hist-summary' }, [
         el('span', { text: '重复 ' + dupTotal + ' 张' }),
         el('span', { text: '累计获得碎片 ' + shardTotal + ' 个' }),
+        // 普通池 / 追梦池分开计数：两边的代价与返还都不是一套
+        el('span', { class: 'hist-sum-mode', text: '普通池 ' + normalTotal + ' 抽' }),
+        el('span', { class: 'hist-sum-mode', text: '追梦池 ' + dreamTotal + ' 抽' }),
         el('a', { class: 'result-link', href: '#/shards', text: '去碎片兑换 →' }),
       ])
     )
@@ -2926,14 +3529,25 @@
     var rows = el('div', { class: 'hist' })
     hist.slice(0, 200).forEach(function (h) {
       var card = cardById(h.cardId)
-      var row = el('div', { class: 'hist-row' }, [
+      var row = el('div', { class: 'hist-row' + (h.dream ? ' hist-dream' : '') }, [
         el('span', { class: 'hist-idx', text: '#' + fmt(h.index) }),
+        // 这一抽是普通池还是追梦池（用户要求分开）——两种的代价与返还都不一样
+        el('span', {
+          class: 'badge-mode ' + (h.dream ? 'badge-mode-dream' : 'badge-mode-normal'),
+          text: h.dream ? '追梦池' : '普通池',
+          title: h.dream ? '追梦池：花抽卡券，重复卡返还点数' : '普通池：花点数，重复卡返还碎片',
+        }),
         rarityChip(h.rarity),
         el('span', { class: 'hist-name', text: card ? card.name : h.cardId + '（这张卡已不在名册里）' }),
         // 这一张是闪卡：记录里也要标出来，否则「我明明抽到过红碎」查不到证据
         foilId(h.finish) ? el('span', { class: 'badge-foil-hist badge-foil-' + h.finish, text: foilLabel(h.finish) }) : null,
         h.duplicate
-          ? el('span', { class: 'badge-dup small', text: '重复 +' + fmt(h.shards || 0) + ' 碎片' })
+          ? el('span', {
+              class: 'badge-dup small',
+              text: h.dream
+                ? '重复 +' + fmt(h.points || 0) + ' 点数'
+                : '重复 +' + fmt(h.shards || 0) + ' 碎片',
+            })
           : el('span', { class: 'badge-new small', text: 'NEW' }),
         h.guaranteed ? el('span', { class: 'badge-guarantee small', text: '保底' }) : null,
         el('span', { class: 'hist-time', text: fmtTime(h.at) }),
@@ -3097,6 +3711,7 @@
 
     // --- 碎片规则 ---------------------------------------------------------
     var shardCfg = s.shards || {}
+    var ticketCfg = shardCfg.tickets || {}
     wrap.appendChild(
       el('div', { class: 'panel' }, [
         el('div', { class: 'panel-title', text: '③-2 碎片规则' }),
@@ -3104,6 +3719,23 @@
         field('每张重复卡给几个碎片', input('number', shardCfg.perDuplicate, 'shard-per')),
         field('兑换一张同档卡牌需要几个碎片', input('number', shardCfg.costForCard, 'shard-card')),
         field('升一级稀有度需要几个碎片', input('number', shardCfg.costForUpgrade, 'shard-up')),
+        el('p', { class: 'panel-hint', text: '碎片 → 抽卡券（抽卡券用在追梦池；填 0 张 = 这一档不开放兑换）：' }),
+        el('div', { class: 'panel-sub' }, rarityList().map(function (r) {
+          // 快照里没配这一档时显示**默认比例**（而不是空框）—— 留空会让人以为
+          // 「这一档没配」，而实际生效的是默认值
+          var raw = ticketCfg[r.id] || (window.GachaShards && window.GachaShards.TICKET_DEFAULTS && window.GachaShards.TICKET_DEFAULTS[r.id]) || {}
+          return field(
+            (r.label || r.id) + ' · 几个碎片',
+            input('number', raw.shards === undefined ? '' : raw.shards, 'ticket-shards-' + r.id, r.id)
+          )
+        })),
+        el('div', { class: 'panel-sub' }, rarityList().map(function (r) {
+          var raw = ticketCfg[r.id] || (window.GachaShards && window.GachaShards.TICKET_DEFAULTS && window.GachaShards.TICKET_DEFAULTS[r.id]) || {}
+          return field(
+            (r.label || r.id) + ' · 换几张券',
+            input('number', raw.tickets === undefined ? '' : raw.tickets, 'ticket-gain-' + r.id, r.id)
+          )
+        })),
         el('div', { class: 'panel-actions' }, [
           el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-shards' }, ['保存碎片规则']),
         ]),
@@ -3233,6 +3865,29 @@
       ])
     )
 
+    // --- 概率自检（用户要求：检测真实概率是否与标称概率一致）----------------
+    //
+    // 为什么放在后台：这是一把**尺子**，不是给读者看的东西。
+    // 它当场跑几万次模拟，把每个池子（含追梦模式）的实测出率与标称并排摆出来。
+    // 追梦池的概率是随次数变化的，所以基准取 `dreamLongRunRates` 的**解析长期平均**
+    // （拿「第 0 次的 2.5%」去比会得出一堆假偏差 —— 那正是这套机制自带的坑）。
+    wrap.appendChild(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'panel-title', text: '③-5 概率自检（模拟抽卡，实测 vs 标称）' }),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '在这里跑一批纯模拟抽卡（不消耗你的券、不改你的记录），把每一档的实测出率与标称摆在一起。' +
+            '容差 = 3σ + 0.3 个百分点（σ 是二项分布标准差），极小概率的档位不会因为抖动被判失败。',
+        }),
+        el('div', { class: 'panel-actions' }, [
+          field('模拟抽数', input('number', 200000, 'audit-draws')),
+          el('button', { class: 'btn primary', type: 'button', 'data-bind': 'run-audit' }, ['跑一次概率自检']),
+        ]),
+        el('div', { class: 'panel-out audit-out', 'data-bind': 'audit-out' }),
+      ])
+    )
+
     // --- 卡池 -------------------------------------------------------------
     state.data.pools.forEach(function (p) {
       var weightRows = rarityList().map(function (r) {
@@ -3279,6 +3934,8 @@
           field('不要哪些（一行一个：`系列` 或 `系列:档位1,档位2`，例 `常驻:SR,SSR`；留空 = 不排除）', excludeArea),
           field('封面卡', coverSel),
           el('div', { class: 'weight-grid' }, weightRows),
+          // 追梦池：每个池子一份（出率 / 工艺概率 / 票价 / 动态概率步进）
+          dreamFields(p),
           el('div', { class: 'panel-actions' }, [
             el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-pool-' + p.id }, ['保存这个卡池']),
             el('button', { class: 'btn ghost', type: 'button', 'data-bind': 'del-pool-' + p.id }, ['删除']),
@@ -3286,6 +3943,53 @@
         ])
       )
     })
+    /**
+     * 一个卡池的「追梦池」配置区（用户要求：为现有卡池增加追梦池的切换选项）。
+     *
+     * 折在一个 `<details>` 里：普通出率那块是天天要看的，追梦这块是偶尔调的，
+     * 摊平会把卡池面板撑得找不到重点。
+     */
+    function dreamFields(p) {
+      var d = p.dream || {}
+      var dw = d.weights || {}
+      var dr = d.foilRates || {}
+      var dc = d.cost || {}
+      var box = el('details', { class: 'dream-admin' }, [
+        el('summary', { text: '追梦池设置（切换项 · 另一套概率 · 花抽卡券）' }),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '读者在抽卡页可以把这个池子切到「追梦池」：出率换成下面这套、工艺概率上调、' +
+            '并且按这里的票价扣抽卡券（普通模式依旧免费）。' +
+            '动态概率：每抽一次最高档 +' + (d.spStep === undefined ? 0.1 : d.spStep) + '%、' +
+            (d.spFrom || 'SR') + ' -同样多，最多累计 ' + (d.spMaxSteps === undefined ? 75 : d.spMaxSteps) + ' 次，抽到最高档重置。',
+        }),
+        field('提供追梦池切换项（关掉 = 这个池子只有普通模式）', select(['true', 'false'], String(d.enabled !== false), 'dream-on-' + p.id)),
+        el('div', { class: 'panel-sub' }, rarityList().map(function (r) {
+          return field(
+            '追梦权重 · ' + (r.label || r.id),
+            input('number', dw[r.id] === undefined ? '' : dw[r.id], 'dream-w-' + p.id + '-' + r.id, r.id)
+          )
+        })),
+        el('div', { class: 'panel-sub' }, foilKinds().map(function (k) {
+          return field(
+            '追梦工艺概率 · ' + (k.label || k.id) + '（%）',
+            input('number', dr[k.id] === undefined ? '' : dr[k.id], 'dream-foil-' + p.id + '-' + k.id, k.id)
+          )
+        })),
+        el('div', { class: 'panel-sub' }, [
+          field('单抽要几张券', input('number', dc.single === undefined ? 1 : dc.single, 'dream-cost1-' + p.id)),
+          field('十连要几张券', input('number', dc.ten === undefined ? 10 : dc.ten, 'dream-cost10-' + p.id)),
+        ]),
+        el('div', { class: 'panel-sub' }, [
+          field('每次涨多少（百分点）', input('number', d.spStep === undefined ? 0.1 : d.spStep, 'dream-step-' + p.id)),
+          field('从哪一档扣', select(rarityList().map(function (r) { return r.id }), d.spFrom || 'SR', 'dream-from-' + p.id)),
+          field('最多累计几次', input('number', d.spMaxSteps === undefined ? 75 : d.spMaxSteps, 'dream-max-' + p.id)),
+        ]),
+      ])
+      return box
+    }
+
     wrap.appendChild(
       el('div', { class: 'panel-actions' }, [
         el('button', { class: 'btn', type: 'button', 'data-bind': 'add-pool' }, ['新建一个卡池']),
@@ -3576,6 +4280,22 @@
           var n = Number(node ? String(node.value).trim() : '')
           return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback
         }
+        // 碎片 -> 抽卡券：`shards` 必须 >= 1（0 会变成除零）；`tickets` 允许 0
+        //（= 这一档不开放兑换，这是**有意义**的配置，不能当成填错而回落）。
+        var tickets = {}
+        rarityList().forEach(function (r) {
+          var sNode = q('ticket-shards-' + r.id)
+          var gNode = q('ticket-gain-' + r.id)
+          var sv = sNode ? String(sNode.value).trim() : ''
+          var gv = gNode ? String(gNode.value).trim() : ''
+          var sh = sv === '' ? 1 : Number(sv)
+          var tk = gv === '' ? 0 : Number(gv)
+          if (!Number.isFinite(sh) || sh < 1 || !Number.isFinite(tk) || tk < 0) {
+            window.alert('碎片换券的比例要写成「几个碎片（≥1）换几张券（≥0）」，现在是：' + (r.label || r.id) + ' = ' + sv + ' : ' + gv)
+            return
+          }
+          tickets[r.id] = { shards: Math.floor(sh), tickets: Math.floor(tk) }
+        })
         request('/settings.json', {
           method: 'POST',
           body: {
@@ -3583,11 +4303,135 @@
               perDuplicate: intOf('shard-per', 1),
               costForCard: intOf('shard-card', 5),
               costForUpgrade: intOf('shard-up', 5),
+              tickets: tickets,
             },
           },
         })
           .then(function (res) { afterWrite(res, '碎片规则已保存') })
           .catch(fail)
+      })
+    }
+
+    // ---- 概率自检：跑模拟，把「实测 vs 标称」摆出来 -------------------------
+    var runAudit = q('run-audit')
+    if (runAudit) {
+      runAudit.addEventListener('click', function () {
+        var g = G()
+        // ⚠️ 用后台自己的 q()（在 view 里查），不要用 state.els：后台那些面板是
+        // 渲染时才建出来的，boot 时的 cacheEls() 根本看不到它们。
+        var out = q('audit-out')
+        if (!g || !out) {
+          window.alert('draw.js 没有加载成功，跑不了自检')
+          return
+        }
+        var draws = Math.floor(Number(q('audit-draws') ? q('audit-draws').value : 200000))
+        if (!Number.isFinite(draws) || draws < 1000 || draws > 2000000) {
+          window.alert('模拟抽数请填 1000 ~ 2000000 之间（现在填的是 ' + draws + '）')
+          return
+        }
+        clear(out)
+        out.appendChild(el('div', { class: 'audit-head', text: '正在跑 ' + fmt(draws) + ' 抽……' }))
+        // 让浏览器先把「正在跑」画出来，再做这批同步计算
+        //（几万到几十万次纯函数调用大约几十到几百毫秒）
+        window.setTimeout(function () {
+          try {
+            clear(out)
+            var d = state.data
+            var lines = []
+            lines.push(el('div', { class: 'audit-head', text: '概率自检：' + fmt(draws) + ' 抽 / 每个池子（含追梦模式）' }))
+            var pools = d.pools || []
+            var allOk = true
+            for (var pi = 0; pi < pools.length; pi++) {
+              var pool = pools[pi]
+              var modes = [{ dream: false, label: '普通' }]
+              if (g.dreamAvailable(pool)) modes.push({ dream: true, label: (pool.dream && pool.dream.label) || '追梦池' })
+              for (var mi = 0; mi < modes.length; mi++) {
+                var mode = modes[mi]
+                var sim = g.simulate(d, { poolId: pool.id, draws: draws, count: 10, dream: mode.dream, seed: 20260918, freezeSteps: false })
+                if (!sim.ok) {
+                  allOk = false
+                  lines.push(el('div', { class: 'audit-row audit-bad', text: pool.name + ' / ' + mode.label + '：' + sim.error }))
+                  continue
+                }
+                // 标称：普通池是常量；追梦池要用**解析长期平均**（概率逐次变化）
+                var expected = {}
+                if (mode.dream) {
+                  var lr = g.dreamLongRunRates(d, pool)
+                  if (lr) for (var rid1 in lr.rates) expected[rid1] = lr.rates[rid1]
+                } else {
+                  var rt = g.rateTable(d, pool.id)
+                  for (var ri = 0; ri < rt.length; ri++) expected[rt[ri].rarity.id] = rt[ri].rate * 100
+                }
+                var rows = g.compareRates(sim.rarityRate, expected, sim.draws)
+                var block = el('div', { class: 'audit-block' }, [
+                  el('div', {
+                    class: 'audit-title',
+                    text: pool.name + ' · ' + mode.label + '（' + fmt(sim.draws) + ' 抽' +
+                      (mode.dream ? '，含动态概率；平均 ' + (Number.isFinite(sim.drawsPerSp) ? Math.round(sim.drawsPerSp) : '∞') + ' 抽一张 ' + ((rarityById(lr && lr.spId) || {}).label || 'SP') : '') + '）',
+                  }),
+                  el('div', { class: 'audit-grid' }, [
+                    el('div', { class: 'audit-cell audit-h', text: '档位' }),
+                    el('div', { class: 'audit-cell audit-h', text: '标称' }),
+                    el('div', { class: 'audit-cell audit-h', text: '实测' }),
+                    el('div', { class: 'audit-cell audit-h', text: '偏差' }),
+                    el('div', { class: 'audit-cell audit-h', text: '容差' }),
+                  ]),
+                ])
+                rows.forEach(function (row) {
+                  if (!row.ok) allOk = false
+                  var label = (rarityById(row.id) || {}).label || row.id
+                  block.appendChild(
+                    el('div', { class: 'audit-grid' + (row.ok ? '' : ' audit-bad') }, [
+                      el('div', { class: 'audit-cell', text: label }),
+                      el('div', { class: 'audit-cell', text: row.expected.toFixed(2) + '%' }),
+                      el('div', { class: 'audit-cell', text: row.measured.toFixed(2) + '%' }),
+                      el('div', { class: 'audit-cell', text: (row.diff >= 0 ? '+' : '') + row.diff.toFixed(2) }),
+                      el('div', { class: 'audit-cell', text: '±' + row.tolerance.toFixed(2) }),
+                    ])
+                  )
+                })
+                // 工艺概率也一起自检（追梦池是 40/10/1）
+                var foilExpected = {}
+                var foilTable = mode.dream ? g.dreamFoilRates(d, pool) : ((d.settings.foils && d.settings.foils.rates) || {})
+                for (var fi2 = 0; fi2 < g.FOIL_IDS.length; fi2++) {
+                  var fid2 = g.FOIL_IDS[fi2]
+                  foilExpected[fid2] = Number(foilTable[fid2] || 0)
+                }
+                var foilRows = g.compareRates(sim.finishRate, foilExpected, sim.draws)
+                block.appendChild(el('div', { class: 'audit-sub', text: '特殊工艺（只统计各档门槛允许的情况）' }))
+                foilRows.forEach(function (row) {
+                  var label = ({ flat: '平闪', full: '全闪', shatter: '红碎' })[row.id] || row.id
+                  // 红碎/全闪有稀有度门槛，实测必然低于配置值 —— 那一档不判失败，
+                  // 只把数字摆出来让人看到「门槛确实在拦」
+                  var gated = row.id !== 'flat'
+                  if (!row.ok && !gated) allOk = false
+                  block.appendChild(
+                    el('div', { class: 'audit-grid' + (row.ok ? '' : gated ? ' audit-gated' : ' audit-bad') }, [
+                      el('div', { class: 'audit-cell', text: label }),
+                      el('div', { class: 'audit-cell', text: row.expected.toFixed(2) + '%' }),
+                      el('div', { class: 'audit-cell', text: row.measured.toFixed(2) + '%' }),
+                      el('div', { class: 'audit-cell', text: (row.diff >= 0 ? '+' : '') + row.diff.toFixed(2) }),
+                      el('div', { class: 'audit-cell', text: gated ? '有门槛' : '±' + row.tolerance.toFixed(2) }),
+                    ])
+                  )
+                })
+                lines.push(block)
+              }
+            }
+            lines.push(
+              el('div', {
+                class: 'audit-verdict ' + (allOk ? 'audit-ok' : 'audit-fail'),
+                text: allOk
+                  ? '结论：实测出率全部落在容差内 —— 与标称一致。'
+                  : '结论：有档位超出容差（上面标红的行）。要么配置有问题，要么抽数太少（把模拟抽数调大再跑一次）。',
+              })
+            )
+            lines.forEach(function (n) { out.appendChild(n) })
+          } catch (err) {
+            clear(out)
+            out.appendChild(el('div', { class: 'audit-verdict audit-fail', text: '自检出错：' + err.message }))
+          }
+        }, 30)
       })
     }
 
@@ -3752,6 +4596,38 @@
             }
           }
           var coverEl = q('pool-cover-' + p.id)
+          // 追梦池：把这些字段一起保存。空白的数值**跳过**（保留原值），
+          // 而不是写成 0 —— 一个手滑清空输入框就会把整档概率变成 0。
+          var dreamW = {}
+          var dreamR = {}
+          rarityList().forEach(function (r) {
+            var wi = view.querySelector('[data-bind="dream-w-' + p.id + '-' + r.id + '"]')
+            if (wi && wi.value.trim() !== '') dreamW[r.id] = Number(wi.value.trim())
+          })
+          foilKinds().forEach(function (k) {
+            var fi = view.querySelector('[data-bind="dream-foil-' + p.id + '-' + k.id + '"]')
+            if (fi && fi.value.trim() !== '') dreamR[k.id] = Number(fi.value.trim())
+          })
+          function numField(bind, fallback) {
+            var node = q(bind)
+            if (!node) return fallback
+            var raw = String(node.value).trim()
+            if (raw === '') return fallback
+            var n = Number(raw)
+            return Number.isFinite(n) ? n : fallback
+          }
+          var dreamBody = {
+            enabled: (q('dream-on-' + p.id) ? q('dream-on-' + p.id).value !== 'false' : true),
+            weights: dreamW,
+            foilRates: dreamR,
+            cost: {
+              single: numField('dream-cost1-' + p.id, 1),
+              ten: numField('dream-cost10-' + p.id, 10),
+            },
+            spStep: numField('dream-step-' + p.id, 0.1),
+            spFrom: q('dream-from-' + p.id) ? q('dream-from-' + p.id).value : 'SR',
+            spMaxSteps: numField('dream-max-' + p.id, 75),
+          }
           request('/pool/' + encodeURIComponent(p.id), {
             method: 'PUT',
             body: {
@@ -3761,6 +4637,7 @@
               series: series,
               exclude: exclude,
               coverCardId: coverEl ? coverEl.value : '',
+              dream: dreamBody,
             },
           })
             .then(function (res) { afterWrite(res, '卡池已保存') })
@@ -4428,13 +5305,34 @@
       e.warning.title = state.warning || ''
     }
 
-    // 货币：只有抽卡真的要花东西时才显示。用户给定的机制里抽卡是免费的
-    // （costSingle = 0），这时显示「0 抽卡券」只会让人困惑「我该去哪弄券」。
+    // 货币：只有抽卡真的要花东西时才显示。用户给定的机制里普通抽卡是免费的
+    // —— 现在普通池花点数、追梦池花抽卡券，所以两枚徽标都要出现。
+    // ⚠️ 追梦池的票价也要一起看：只要有任何一个池子开着追梦模式，券徽标就得在，
+    // 否则读者在追梦池里看不到自己还剩几张券。
     if (e.currency) {
       var pullCfg = (d.settings && d.settings.pull) || {}
-      var usesCurrency = Number(pullCfg.costSingle || 0) > 0 || Number(pullCfg.costTen || 0) > 0
+      var dreamCosts = false
+      var pools = d.pools || []
+      for (var pi = 0; pi < pools.length; pi++) {
+        var pd = pools[pi].dream
+        if (!pd || pd.enabled === false) continue
+        var pc = pd.cost || {}
+        if (Number(pc.single || 0) > 0 || Number(pc.ten || 0) > 0) {
+          dreamCosts = true
+          break
+        }
+      }
+      var usesCurrency = Number(pullCfg.costSingle || 0) > 0 || Number(pullCfg.costTen || 0) > 0 || dreamCosts
       e.currency.hidden = !usesCurrency
-      if (usesCurrency) e.currency.textContent = fmt(player().currency) + ' ' + (player().currencyName || '抽卡券')
+      if (usesCurrency) e.currency.textContent = fmt(tickets()) + ' ' + (player().currencyName || '抽卡券')
+    }
+
+    // 点数：普通抽卡的次数。它**总是**显示 —— 普通抽卡每次都花它，
+    // 藏起来只会让读者以为抽卡是免费的（用户明确要求放在券/碎片左边）。
+    if (e.pointsChip) {
+      e.pointsChip.hidden = false
+      e.pointsChip.textContent = fmt(points()) + ' 点数'
+      e.pointsChip.title = '普通抽卡每次消耗 1 点；每天登陆 +300（可累积）。追梦池花抽卡券'
     }
 
     // 碎片总览：抽卡页与碎片页都显示，点得动（跳到碎片兑换）
@@ -4565,6 +5463,7 @@
     e.pickDialog = document.getElementById('pick-dialog')
     e.cardDialog = document.getElementById('card-dialog')
     e.cacheDialog = document.getElementById('cache-dialog')
+    e.resetDialog = document.getElementById('reset-dialog')
 
     // 缺失的绑定必须说出来 —— 否则只会表现成「某个角落不更新」，极难定位
     var REQUIRED = ['view', 'nav', 'brandTitle', 'warning', 'currency', 'shardChip', 'unlockBtn', 'lockBtn', 'toast']
@@ -4625,6 +5524,21 @@
     if (e.cacheClear) e.cacheClear.addEventListener('click', doClearCache)
     // 顶栏一键按钮：按下去立刻开始抓，进度就写在按钮自己身上
     if (e.cacheLoad) e.cacheLoad.addEventListener('click', function () { loadAllImages(false) })
+    // 顶栏的「缓存管理」与页脚那个是同一个对话框（两个入口都留在，别删页脚那个）
+    if (e.cacheTop) e.cacheTop.addEventListener('click', openCacheDialog)
+    // 清空缓存（重置存档）：两级确认，第二级要等 5 秒
+    if (e.resetOpen) e.resetOpen.addEventListener('click', function () { openResetDialog() })
+    if (e.resetCancel) e.resetCancel.addEventListener('click', function () { closeResetDialog() })
+    if (e.resetConfirm) e.resetConfirm.addEventListener('click', function () { doReset() })
+    if (e.resetDialog) {
+      // Esc / 点遮罩关掉时也要把倒计时清掉，否则它会一直在后台跑
+      e.resetDialog.addEventListener('close', function () {
+        if (state.resetTimer) {
+          window.clearInterval(state.resetTimer)
+          state.resetTimer = 0
+        }
+      })
+    }
     if (e.shardChip) {
       e.shardChip.addEventListener('click', function () { go('#/shards') })
     }
@@ -4714,12 +5628,19 @@
     // 否则刷新一次又变回「显示最好的那一种」，读者会以为切换没生效。
     var savedFoil = lsGet(LS.foilView, null)
     state.foilView = savedFoil && typeof savedFoil === 'object' && !Array.isArray(savedFoil) ? savedFoil : {}
+    // 读者偏好：哪些卡池切到了追梦池模式（花的是他的券，所以由他决定并记住）
+    var savedDream = lsGet(LS.dream, null)
+    state.dreamPools = savedDream && typeof savedDream === 'object' && !Array.isArray(savedDream) ? savedDream : {}
     // 图片缓存：注册 Service Worker。放在数据加载**之前** ——
     // 越早注册，越早开始接管图片请求；失败也不影响页面。
     registerServiceWorker()
     loadData()
       .then(function () {
+        // 每日赠送：每天第一次打开送 300 点（用户要求）。
+        // 放在 render 之前，这样首屏就能看到点数已经到账。
+        var gift = claimDailyGift()
         render()
+        if (gift) toast('每日赠送：+' + gift.points + ' 点（每点可以普通抽一次）', 'ok')
         // 顶栏「加载图片」的文案要看本地已经有多少张，数据到位后才能算
         paintCacheLoadButton()
         var route = parseRoute()

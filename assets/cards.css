@@ -523,7 +523,8 @@
 .foil-shine,
 .foil-shards,
 .foil-glare,
-.foil-sparks {
+.foil-sparks,
+.foil-sweep {
   position: absolute;
   inset: 0;
   z-index: 4;
@@ -532,6 +533,76 @@
   /* 重绘范围锁在这几层自己的盒子里：拖动时每帧都要重画它们，
      不锁的话失效会往上冒到整张卡甚至整页 */
   contain: paint;
+}
+
+/* --------------------------------------------------------------------------
+   小图上的自动扫光（用户要求：图鉴 / 抽卡结果 / 抽卡动画里每 5 秒扫一遍）
+   --------------------------------------------------------------------------
+   为什么要有它：小图没人会去悬停或拖动，光靠 --pointer-* 那套「跟着指针走」
+   等于什么都不发生 —— 读者根本看不出这张是闪卡。加一道**自动**的条形光，
+   闪卡就会自己把质感显出来。
+
+   实现要点：只动 transform + opacity（合成器上跑，不重绘），
+   5 秒一轮，其中前 ~1.4 秒是「扫过去」，其余时间是等待 —— 也就是「每隔 5 秒一次」。
+   条形光斜 12°，从左侧外面进入、从右侧外面出去，扫完完全透明。
+   ========================================================================== */
+
+.foil-sweep::before {
+  content: '';
+  position: absolute;
+  top: -25%;
+  bottom: -25%;
+  left: 0;
+  width: 55%;
+  background-image:
+    linear-gradient(
+      100deg,
+      hsla(0, 0%, 100%, 0) 0%,
+      hsla(0, 0%, 100%, 0.16) 34%,
+      hsla(0, 0%, 100%, 0.5) 50%,
+      hsla(0, 0%, 100%, 0.16) 66%,
+      hsla(0, 0%, 100%, 0) 100%
+    ),
+    linear-gradient(
+      100deg,
+      hsla(0, 0%, 100%, 0) 30%,
+      var(--foil-3) 44%,
+      var(--foil-5) 50%,
+      var(--foil-1) 56%,
+      hsla(0, 0%, 100%, 0) 70%
+    );
+  background-blend-mode: screen;
+  mix-blend-mode: screen;
+  opacity: 0;
+  transform: translate3d(-160%, 0, 0) skewX(-12deg);
+  animation: foil-sweep 5s linear infinite;
+}
+
+@keyframes foil-sweep {
+  0% {
+    transform: translate3d(-160%, 0, 0) skewX(-12deg);
+    opacity: 0;
+  }
+  3% {
+    opacity: 0.75;
+  }
+  25% {
+    transform: translate3d(200%, 0, 0) skewX(-12deg);
+    opacity: 0;
+  }
+  100% {
+    transform: translate3d(200%, 0, 0) skewX(-12deg);
+    opacity: 0;
+  }
+}
+
+/* 条形光的强度按档次略作区分：红碎最亮，平闪最含蓄 */
+.card-foil-flat .foil-sweep::before {
+  filter: brightness(0.85);
+}
+
+.card-foil-shatter .foil-sweep::before {
+  filter: brightness(1.25) saturate(1.2);
 }
 
 .foil-shine,
@@ -1009,11 +1080,15 @@
   cursor: grabbing;
 }
 
-/* 减少动态效果：不漂移粒子与碎块，也不做过渡 */
+/* 减少动态效果：不漂移粒子与碎块、不自动扫光，也不做过渡 */
 @media (prefers-reduced-motion: reduce) {
   .foil-sparks,
-  .foil-shards::before {
+  .foil-shards::before,
+  .foil-sweep::before {
     animation: none;
+  }
+  .foil-sweep::before {
+    opacity: 0; /* 关掉动画之后它就该彻底不出现（否则会停在某个角度变成一条静止亮带） */
   }
   .card-inspect,
   .card-inspect:hover {

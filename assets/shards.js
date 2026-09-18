@@ -40,7 +40,48 @@
   var DEFAULTS = { perDuplicate: 1, costForCard: 5, costForUpgrade: 5 }
 
   /**
-   * 取矩片规则，缺字段时退回默认值。
+   * 碎片 -> 抽卡券 的默认比例（用户 2026-09-18 给的）：
+   *   SR 5:1 ／ SSR 1:1 ／ UR 1:5 ／ SP(???) 1:25
+   * 键是**档位 id**（`???` 就是 SP），值是 `{ shards, tickets }`：
+   * 花 `shards` 个碎片换 `tickets` 张券，必须**整批**换 ——
+   * 所以界面上是「换 1 批 / 换 N 批」，而不是按单个碎片算（SR 是 5:1，单个除不尽）。
+   */
+  var TICKET_DEFAULTS = {
+    SR: { shards: 5, tickets: 1 },
+    SSR: { shards: 1, tickets: 1 },
+    UR: { shards: 1, tickets: 5 },
+    '???': { shards: 1, tickets: 25 },
+  }
+
+  /**
+   * 追梦池里重复卡的返还（用户 2026-09-18）：
+   * 「追梦池中抽到的重复卡将不返还碎片，而是返还点数，不论品质均为 1 点，
+   *   面闪/全闪/红碎额外返还 1/2/5 点」。
+   *
+   * 与 lib/data.js 的 defaultDreamReward 保持一致。
+   */
+  var DREAM_REWARD_DEFAULTS = { points: 1, foilBonus: { flat: 1, full: 2, shatter: 5 } }
+
+  /** 「清空缓存」重置后的起始资源（与 lib/data.js 的 defaultResetGift 一致） */
+  var RESET_DEFAULTS = { points: 300, tickets: 20 }
+
+  /**
+   * 工艺 id 列表。
+   *
+   * 优先用 draw.js 那一份（浏览器里它先加载，是**唯一**的工艺定义）；
+   * 拿不到时用这份兜底 —— 本文件要能在 Node 里单独加载（测试就是这么跑的）。
+   * `test-shards.mjs` 里有一条断言把两者钉住，写歪了会红。
+   */
+  var FOIL_ID_FALLBACK = ['flat', 'full', 'shatter']
+
+  function foilIds() {
+    var g = root && root.Gacha
+    if (g && Array.isArray(g.FOIL_IDS) && g.FOIL_IDS.length) return g.FOIL_IDS
+    return FOIL_ID_FALLBACK
+  }
+
+  /**
+   * 取碎片规则，缺字段时退回默认值。
    * 传进来的可能是整个 data，也可能只是 settings —— 两种都吃。
    */
   function rules(dataOrSettings) {
@@ -54,6 +95,122 @@
       perDuplicate: posInt(sh.perDuplicate, DEFAULTS.perDuplicate),
       costForCard: posInt(sh.costForCard, DEFAULTS.costForCard),
       costForUpgrade: posInt(sh.costForUpgrade, DEFAULTS.costForUpgrade),
+    }
+  }
+
+  /**
+   * 每个档位的「碎片 -> 抽卡券」比例。
+   *
+   * ⚠️ 缺档位时**回落默认**，而不是「不能换」：作者把 `tickets` 里某一档删掉，
+   * 意图通常是「这档懒得写」，不是「这档禁止兑换」—— 而「禁止」应该用 0 表达。
+   * 写了 0 的档位会被保留成「不能换」（界面上会说明原因）。
+   */
+  function ticketRules(dataOrSettings) {
+    var s = dataOrSettings && dataOrSettings.settings ? dataOrSettings.settings : dataOrSettings || {}
+    var t = s && s.shards && s.shards.tickets && typeof s.shards.tickets === 'object' ? s.shards.tickets : null
+    var out = {}
+    var ids = Object.keys(TICKET_DEFAULTS)
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i]
+      var d = TICKET_DEFAULTS[id]
+      var raw = t ? t[id] : null
+      if (raw && typeof raw === 'object') {
+        var sh = Number(raw.shards)
+        var tk = Number(raw.tickets)
+        out[id] = {
+          shards: Number.isFinite(sh) && sh >= 1 ? Math.floor(sh) : d.shards,
+          // 0 是合法的：明确表示「这一档不开放兑换」
+          tickets: Number.isFinite(tk) && tk >= 0 ? Math.floor(tk) : d.tickets,
+        }
+      } else {
+        out[id] = { shards: d.shards, tickets: d.tickets }
+      }
+    }
+    return out
+  }
+
+  /**
+   * 碎片换券：每个档位现在能换多少、还差几个 —— 给界面用。
+   * @returns {Array<{rarityId, label, have, perShards, perTickets, batches,
+   *                  ticketsGain, missing, disabled}>}
+   */
+  function ticketStatus(data) {
+    var t = ticketRules(data)
+    var shards = (data && data.player && data.player.shards) || {}
+    var list = sortedRarities(data)
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var rar = list[i]
+      var rule = t[rar.id]
+      if (!rule) continue
+      var have = Math.max(0, Number(shards[rar.id] || 0))
+      var disabled = !(rule.tickets > 0)
+      var batches = disabled ? 0 : Math.floor(have / rule.shards)
+      out.push({
+        rarityId: rar.id,
+        label: rar.label || rar.id,
+        have: have,
+        perShards: rule.shards,
+        perTickets: rule.tickets,
+        batches: batches,
+        ticketsGain: batches * rule.tickets,
+        missing: disabled ? 0 : Math.max(0, rule.shards - have),
+        disabled: disabled,
+      })
+    }
+    return out
+  }
+
+  /**
+   * 能不能换：**整批**换（`batches` 批）。
+   * @returns {{ok:true, cost, gain, rarity, batches} | {ok:false, error}}
+   */
+  function canExchangeTickets(data, rarityId, batches) {
+    var t = ticketRules(data)
+    var rule = t[rarityId]
+    if (!rule) return { ok: false, error: '稀有度「' + rarityId + '」没有配置碎片兑换抽卡券的比例' }
+    var known = null
+    var list = sortedRarities(data)
+    for (var i = 0; i < list.length; i++) if (list[i].id === rarityId) known = list[i]
+    if (!known) return { ok: false, error: '稀有度「' + rarityId + '」不在档位表里' }
+    if (!(rule.tickets > 0)) {
+      return { ok: false, error: (known.label || rarityId) + ' 碎片目前不开放兑换抽卡券' }
+    }
+    var n = Math.floor(Number(batches))
+    if (!Number.isFinite(n) || n < 1) return { ok: false, error: '至少要换 1 批' }
+    var shards = (data && data.player && data.player.shards) || {}
+    var have = Math.max(0, Number(shards[rarityId] || 0))
+    var cost = n * rule.shards
+    if (have < cost) {
+      return {
+        ok: false,
+        error: (known.label || rarityId) + ' 碎片不够：换 ' + n + ' 批需要 ' + cost + ' 个，现有 ' + have + ' 个',
+      }
+    }
+    return { ok: true, cost: cost, gain: n * rule.tickets, rarity: known, batches: n }
+  }
+
+  /**
+   * 结算一次「碎片 -> 抽卡券」。**纯函数**，返回新的碎片表与券数。
+   *
+   * 券数加在 `currency` 上（服务端与静态站同名同形）——
+   * 所以调用方拿到结果后要把 `currency` 一起写回去，别只写 shards。
+   */
+  function exchangeTickets(data, rarityId, batches) {
+    var check = canExchangeTickets(data, rarityId, batches)
+    if (!check.ok) return check
+    var shards = Object.assign({}, (data && data.player && data.player.shards) || {})
+    shards[rarityId] = Math.max(0, Number(shards[rarityId] || 0) - check.cost)
+    if (shards[rarityId] === 0) delete shards[rarityId]
+    var currency = Math.max(0, Number((data && data.player && data.player.currency) || 0)) + check.gain
+    return {
+      ok: true,
+      shards: shards,
+      currency: currency,
+      cost: check.cost,
+      gain: check.gain,
+      rarity: check.rarity,
+      batches: check.batches,
     }
   }
 
@@ -282,17 +439,25 @@
    *
    * @param {object} data 快照（需要 settings.shards / player.owned / player.shards）
    * @param {Array<{card:{id,rarity}, rarityId}>} results drawMany 的结果
+   * @param {object} [opts]
+   *   @param {'shards'|'points'} [opts.reward='shards'] 重复卡返什么：
+   *     普通池返**碎片**（按稀有度），追梦池返**点数**（用户要求：
+   *     「不论品质均为 1 点，面闪/全闪/红碎额外返还 1/2/5 点」）。
    * @returns {{owned, shards, duplicates, newCards:Array, duplicateCards:Array,
-   *            gainedShards:Object, perCard:Array}}
+   *            gainedShards:Object, gainedPoints:number, perCard:Array, reward:string}}
    */
-  function settleDraw(data, results) {
+  function settleDraw(data, results, opts) {
+    opts = opts || {}
     var r = rules(data)
+    var reward = opts.reward === 'points' ? 'points' : 'shards'
+    var dreamReward = dreamRewardRules(data)
     var owned = Object.assign({}, (data && data.player && data.player.owned) || {})
     var shards = Object.assign({}, (data && data.player && data.player.shards) || {})
     var duplicates = 0
     var newCards = []
     var duplicateCards = []
     var gainedShards = {}
+    var gainedPoints = 0
     var perCard = []
 
     for (var i = 0; i < (results || []).length; i++) {
@@ -305,18 +470,26 @@
       owned[card.id] = Number(owned[card.id] || 0) + 1
 
       var gained = 0
+      var points = 0
       if (isDuplicate) {
         duplicates++
-        gained = r.perDuplicate
         duplicateCards.push(card)
-        if (rarity) {
-          shards[rarity] = Number(shards[rarity] || 0) + gained
-          gainedShards[rarity] = Number(gainedShards[rarity] || 0) + gained
+        if (reward === 'points') {
+          // 追梦池：碎片一个都不给，改成点数（基础 + 这一张的工艺加成）
+          var fin = item && item.finish ? String(item.finish) : ''
+          points = dreamReward.points + Number(dreamReward.foilBonus[fin] || 0)
+          gainedPoints += points
+        } else {
+          gained = r.perDuplicate
+          if (rarity) {
+            shards[rarity] = Number(shards[rarity] || 0) + gained
+            gainedShards[rarity] = Number(gainedShards[rarity] || 0) + gained
+          }
         }
       } else {
         newCards.push(card)
       }
-      perCard.push({ card: card, rarity: rarity, duplicate: isDuplicate, shards: gained })
+      perCard.push({ card: card, rarity: rarity, duplicate: isDuplicate, shards: gained, points: points })
     }
 
     return {
@@ -326,13 +499,107 @@
       newCards: newCards,
       duplicateCards: duplicateCards,
       gainedShards: gainedShards,
+      gainedPoints: gainedPoints,
       perCard: perCard,
+      reward: reward,
     }
+  }
+
+  /**
+   * 追梦池重复卡的返还规则（缺字段回落默认）。
+   * @returns {{points:number, foilBonus:Object<string,number>}}
+   */
+  function dreamRewardRules(dataOrSettings) {
+    var s = dataOrSettings && dataOrSettings.settings ? dataOrSettings.settings : dataOrSettings || {}
+    var raw = s && s.dreamReward && typeof s.dreamReward === 'object' ? s.dreamReward : {}
+    var bonus = {}
+    var rawBonus = raw.foilBonus && typeof raw.foilBonus === 'object' ? raw.foilBonus : DREAM_REWARD_DEFAULTS.foilBonus
+    var ids = Object.keys(DREAM_REWARD_DEFAULTS.foilBonus)
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i]
+      var n = Number(rawBonus[id])
+      bonus[id] = Number.isFinite(n) && n >= 0 ? Math.floor(n) : DREAM_REWARD_DEFAULTS.foilBonus[id]
+    }
+    var base = Number(raw.points)
+    return {
+      points: Number.isFinite(base) && base >= 0 ? Math.floor(base) : DREAM_REWARD_DEFAULTS.points,
+      foilBonus: bonus,
+    }
+  }
+
+  /**
+   * 「清空缓存」：把存档重置成起始状态 + 赠送纪念卡（**纯函数**）。
+   *
+   * 用户 2026-09-18：「清空当前拥有的所有碎片、卡牌，点数重置到 300，
+   * 抽卡券重置到 20 张。然后赠送本地新增的三张纪念卡」。
+   *
+   * 纪念卡 = 数据里 `memorial` 非空的卡。**每张都同时拥有三种特殊工艺**
+   *（用户 2026-09-18：「赠送的三张奇迹卡，都是同时拥有三种特殊工艺」），
+   * 所以它们打开大图就能在 普通 / 平闪 / 全闪 / 红碎 之间切换。
+   * **它们不进任何卡池**（见 lib/data.js 的 poolCardIds）。
+   */
+  function resetPlayer(data) {
+    var s = (data && data.settings) || {}
+    var rs = s.reset && typeof s.reset === 'object' ? s.reset : {}
+    var points = Number.isFinite(Number(rs.points)) && Number(rs.points) >= 0 ? Math.floor(Number(rs.points)) : RESET_DEFAULTS.points
+    var tickets = Number.isFinite(Number(rs.tickets)) && Number(rs.tickets) >= 0 ? Math.floor(Number(rs.tickets)) : RESET_DEFAULTS.tickets
+
+    var gift = []
+    var owned = {}
+    var foils = {}
+    var allFinishes = foilIds().slice()
+    var cards = (data && data.cards) || []
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i]
+      if (!c || !c.memorial) continue
+      owned[c.id] = 1
+      if (allFinishes.length) foils[c.id] = allFinishes.slice()
+      gift.push({ card: c, finishes: allFinishes.slice(), finish: allFinishes[allFinishes.length - 1] || '' })
+    }
+
+    var player = {
+      currency: tickets,
+      currencyName: (data && data.player && data.player.currencyName) || '抽卡券',
+      points: points,
+      lastGift: '',
+      pulls: 0,
+      sinceTop: 0,
+      history: [],
+      owned: owned,
+      shards: {},
+      duplicates: 0,
+      spPity: {},
+      dream: {},
+      foils: foils,
+    }
+    return { player: player, gift: gift, stats: { points: points, tickets: tickets, giftCount: gift.length } }
+  }
+
+  /** 纪念卡列表（图鉴里单独分一组；它们不进任何卡池） */
+  function memorialCards(data) {
+    var out = []
+    var cards = (data && data.cards) || []
+    for (var i = 0; i < cards.length; i++) {
+      if (cards[i] && cards[i].memorial) out.push(cards[i])
+    }
+    return out
   }
 
   var api = {
     DEFAULTS: DEFAULTS,
+    TICKET_DEFAULTS: TICKET_DEFAULTS,
+    DREAM_REWARD_DEFAULTS: DREAM_REWARD_DEFAULTS,
+    RESET_DEFAULTS: RESET_DEFAULTS,
+    FOIL_ID_FALLBACK: FOIL_ID_FALLBACK,
+    foilIds: foilIds,
     rules: rules,
+    dreamRewardRules: dreamRewardRules,
+    resetPlayer: resetPlayer,
+    memorialCards: memorialCards,
+    ticketRules: ticketRules,
+    ticketStatus: ticketStatus,
+    canExchangeTickets: canExchangeTickets,
+    exchangeTickets: exchangeTickets,
     sortedRarities: sortedRarities,
     nextRarity: nextRarity,
     prevRarity: prevRarity,

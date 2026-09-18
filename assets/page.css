@@ -1921,6 +1921,282 @@ body:has(dialog[open]) .bar {
   flex-wrap: wrap;
 }
 
+/* 模式切换 + 抽卡键：切模式那一排在上，按钮在下，整体右对齐 */
+.draw-actions {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.draw-action-btns {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 普通 / 追梦池 的分段开关 */
+.dream-switch {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+}
+
+.mode-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.05rem;
+  padding: 0.28rem 0.85rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1.15;
+}
+
+.mode-btn-label {
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.mode-btn-sub {
+  font-size: 0.68rem;
+  opacity: 0.85;
+}
+
+.mode-btn:hover {
+  color: var(--text);
+}
+
+.mode-btn.is-on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* 追梦池的说明行（涨到多少了 / 要花券） */
+.dream-note {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.dream-note-key {
+  padding: 0.1rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: 999px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.dream-note-cost {
+  color: var(--warn, #e8a33d);
+}
+
+.dream-warn {
+  margin-top: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--warn, #e8a33d) 50%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn, #e8a33d) 12%, transparent);
+  color: var(--text);
+  font-size: 0.8rem;
+  max-width: 30rem;
+}
+
+/* 点数徽标（普通抽卡的次数）与券徽标并排，在碎片徽标右边 */
+.points-chip {
+  padding: 0.1rem 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 抽卡记录里的「普通池 / 追梦池」标签 */
+.badge-mode {
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.badge-mode-normal {
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+  color: var(--muted);
+}
+
+.badge-mode-dream {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.hist-dream {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.hist-sum-mode {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 碎片 → 抽卡券 */
+
+.ticket-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.3rem 0 0.5rem;
+}
+
+.ticket-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.ticket-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ticket-have,
+.ticket-gain {
+  font-variant-numeric: tabular-nums;
+}
+
+.ticket-gain {
+  font-weight: 700;
+  color: var(--ok);
+}
+
+.ticket-arrow {
+  color: var(--muted);
+}
+
+.ticket-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.ticket-hint-off {
+  color: color-mix(in srgb, var(--muted) 75%, transparent);
+}
+
+.ticket-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+/* 后台：追梦池设置折叠块 */
+.dream-admin {
+  margin-top: 0.6rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+
+.dream-admin > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.86rem;
+}
+
+/* 后台：概率自检输出 */
+.audit-out {
+  max-height: 30rem;
+  overflow: auto;
+  font-size: 0.8rem;
+}
+
+.audit-head {
+  margin-bottom: 0.4rem;
+  color: var(--muted);
+}
+
+.audit-block {
+  margin-bottom: 0.9rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.audit-title {
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+
+.audit-sub {
+  margin: 0.4rem 0 0.2rem;
+  color: var(--muted);
+}
+
+.audit-grid {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr;
+  gap: 0.2rem 0.5rem;
+  padding: 0.1rem 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.audit-h {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.audit-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.audit-bad {
+  color: #ff6b6b;
+  font-weight: 700;
+}
+
+.audit-gated {
+  color: var(--muted);
+}
+
+.audit-verdict {
+  margin-top: 0.4rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.audit-ok {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  color: var(--ok);
+}
+
+.audit-fail {
+  background: color-mix(in srgb, #ff6b6b 18%, transparent);
+  color: #ff6b6b;
+}
+
 .draw-btn {
   aspect-ratio: 21 / 9;
   width: 9.6rem;
