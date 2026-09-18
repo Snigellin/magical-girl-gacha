@@ -834,9 +834,40 @@ body {
 }
 
 /* --------------------------------------------------------------------------
-   特殊工艺的收集进度（图鉴顶部，三行：平闪 / 全闪 / 红碎）
+   红碎补偿（抽到已有的红碎 -> 返券 + 下次十连必出同档未拥有的红碎）
    -------------------------------------------------------------------------- */
 
+/* 顶栏那个「欠着几张」的提示：用红碎的颜色，和 SP 保底那个 pill 区分开 */
+.pill-comp {
+  border-color: #b02a2f;
+  background: rgba(229, 72, 77, 0.12);
+  color: #b02a2f;
+  font-weight: 600;
+}
+
+/* 结果格子上标出「这一张是补偿补的」 */
+.badge-comp {
+  position: absolute;
+  top: 8px;
+  left: -2px;
+  z-index: 7;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(229, 72, 77, 0.94);
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.result-comp .card {
+  border-color: #b02a2f;
+}
+
+/* --------------------------------------------------------------------------
+   特殊工艺的收集进度（图鉴顶部，三行：平闪 / 全闪 / 红碎）
+   -------------------------------------------------------------------------- */
 .foil-progress {
   display: flex;
   flex-direction: column;

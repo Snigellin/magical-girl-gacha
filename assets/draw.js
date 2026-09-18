@@ -455,6 +455,273 @@
   }
 
   // -------------------------------------------------------------------------
+  // 红碎补偿（用户 2026-09-19 要求）
+  // -------------------------------------------------------------------------
+  //
+  // 原话：「如果在抽卡过程中抽到了已经有了的红碎，则返还 10 张抽卡券，
+  //   并且下次十连必出一张同品质的未拥有红碎。如果是 UR 的红碎，则下次必出
+  //   也是 UR；如果是 SP 的红碎，则下次必出也是 SP」。
+  //
+  // 拆成三件独立的事（都在这里，服务端 / 导出 / 前端共用同一份）：
+  //   · `dupShatters`      —— 这一批里哪些是「已经有了的红碎」（逐张按顺序判定）
+  //   · `shatterCompAfter` —— 抽完之后：返几张券 + 攒下几次欠条（纯函数）
+  //   · `shatterPitySlots` —— 下一次十连要占几个位置、分别是哪一档
+  //
+  // ⚠️ 三个口径必须说清，否则「为什么这次没补偿」永远查不明白：
+  //   ① 「已经有了」= **拥有这张卡 且 工艺表里记着红碎**（两份数据都要）。
+  //      只是拥有卡、但没抽到过它的红碎，抽到红碎属于**新的**，不补偿。
+  //   ② 同一轮里的第二张相同红碎**也算**（对玩家来说同样是废的），
+  //      所以判定要按顺序边走边更新工作副本，不能只看抽之前的快照。
+  //   ③ 欠条是**按档位记次数的**：抽到两张重复 UR 红碎就欠两次，
+  //      下一次十连里会占两个位置（而不是只补一张）。
+
+  /** 红碎补偿的配置（关掉 / 改券数都从这里读） */
+  function shatterComp(data) {
+    var c = (data && data.settings && data.settings.shatterComp) || {}
+    var t = Number(c.tickets)
+    var f = Number(c.fullTickets)
+    return {
+      enabled: c.enabled === undefined ? true : !!c.enabled,
+      tickets: Number.isFinite(t) && t >= 0 ? Math.floor(t) : 10,
+      /**
+       * 这一档的红碎**已经集齐**时返多少张券。
+       *
+       * 用户 2026-09-19 追加：「为了防止程序卡死，如果已经拥有同品质的全部红碎，
+       * 则只返还 20 张抽卡券，没有下次必出的补偿」。
+       * 也就是说：给不了「未拥有的红碎」时，就把这份补偿**折成券**，
+       * 而不是挂一张永远兑现不了的欠条。
+       */
+      fullTickets: Number.isFinite(f) && f >= 0 ? Math.floor(f) : 20,
+    }
+  }
+
+  /** 这张卡的红碎**已经有了**吗（拥有 + 工艺表，缺一不可 —— 与图鉴的 ownedFoils 同源） */
+  function hasShatter(player, cardId) {
+    if (!cardId) return false
+    var owned = (player && player.owned) || {}
+    if (!(Number(owned[cardId] || 0) > 0)) return false
+    var list = (player && player.foils) || {}
+    var mine = list[cardId]
+    return Array.isArray(mine) && mine.indexOf('shatter') >= 0
+  }
+
+  /** 未决的欠条：稀有度 id -> 次数（只留正整数） */
+  function shatterPity(data, player) {
+    var src = player === undefined ? (data && data.player) || {} : player || {}
+    var raw = src.shatterPity
+    var out = {}
+    if (!raw || typeof raw !== 'object') return out
+    for (var k in raw) {
+      if (!Object.prototype.hasOwnProperty.call(raw, k)) continue
+      var n = Math.floor(Number(raw[k]))
+      if (Number.isFinite(n) && n > 0) out[k] = n
+    }
+    return out
+  }
+
+  /**
+   * 这一档里**还没有红碎**的卡 id（只算这个池子抽得到的卡）。
+   *
+   * 用池子的 `byRarity`（服务端算好的成员表）而不是整册：纪念卡之类的卡
+   * 永远不在池子里，拿它们当补偿目标等于给了一张兑现不了的欠条。
+   */
+  function shatterTargets(data, pool, rarityId, player) {
+    var bucket = indexes(data, pool).byRarity[rarityId] || []
+    var out = []
+    for (var i = 0; i < bucket.length; i++) {
+      if (!hasShatter(player, bucket[i])) out.push(bucket[i])
+    }
+    return out
+  }
+
+  /**
+   * 把这一批抽卡结果折进玩家状态（拥有表 + 工艺表），返回一份**新**的状态。
+   *
+   * 为什么要它：判断「这一档还有没有没拿到红碎的卡」必须看**这一批抽完之后**的
+   * 状态 —— 这一批里刚好把最后一张的红碎抽出来时，那张欠条就已经兑现不了了，
+   * 得当场折成券（否则它会一直挂着，正是用户说的「程序卡死」）。
+   */
+  function applyBatchToState(player, results) {
+    var owned = Object.assign({}, (player && player.owned) || {})
+    var foils = {}
+    var src = (player && player.foils) || {}
+    for (var k in src) {
+      if (Object.prototype.hasOwnProperty.call(src, k)) {
+        foils[k] = Array.isArray(src[k]) ? src[k].slice() : []
+      }
+    }
+    for (var i = 0; i < (results || []).length; i++) {
+      var one = results[i]
+      var card = one && one.card
+      if (!card || !card.id) continue
+      owned[card.id] = Number(owned[card.id] || 0) + 1
+      var fin = String((one && one.finish) || '')
+      if (!fin) continue
+      var list = foils[card.id] || (foils[card.id] = [])
+      if (list.indexOf(fin) < 0) list.push(fin)
+    }
+    return { owned: owned, foils: foils }
+  }
+
+  /**
+   * 这一批里哪些是「已经有了的红碎」。
+   *
+   * 逐张按顺序判定，并在工作副本里记下「这张现在也已经有了」——
+   * 于是同一轮十连里连出两张相同红碎时，**两张都算**。
+   */
+  function dupShatters(data, player, results) {
+    var out = []
+    if (!shatterComp(data).enabled) return out
+    var state = { owned: Object.assign({}, (player && player.owned) || {}), foils: {} }
+    var srcFoils = (player && player.foils) || {}
+    for (var k in srcFoils) {
+      if (Object.prototype.hasOwnProperty.call(srcFoils, k)) {
+        state.foils[k] = Array.isArray(srcFoils[k]) ? srcFoils[k].slice() : []
+      }
+    }
+    for (var i = 0; i < (results || []).length; i++) {
+      var one = results[i]
+      var card = one && one.card
+      if (!card || String((one && one.finish) || '') !== 'shatter') continue
+      var id = card.id
+      var had =
+        Number(state.owned[id] || 0) > 0 &&
+        Array.isArray(state.foils[id]) &&
+        state.foils[id].indexOf('shatter') >= 0
+      if (had) out.push({ cardId: id, rarityId: card.rarity || (one && one.rarityId) || '', card: card })
+      state.owned[id] = Number(state.owned[id] || 0) + 1
+      var list = state.foils[id] || (state.foils[id] = [])
+      if (list.indexOf('shatter') < 0) list.push('shatter')
+    }
+    return out
+  }
+
+  /**
+   * 抽完一批之后，红碎补偿变成什么（**纯函数**）。
+   *
+   * 三条分支（顺序很重要）：
+   *   ① **兑现不了的旧欠条**：这一档的红碎已经集齐 -> 折成 fullTickets 张券，欠条删掉。
+   *      这就是用户说的「防止程序卡死」—— 不能挂一张永远兑现不了的欠条。
+   *      （触发路径：欠条攒下之后，玩家用**单抽**抽到了这一档最后一张缺的红碎。）
+   *   ② **本轮新命中的红碎**：这一档还有没拿到红碎的卡 -> 返 tickets 张券 + 攒一张欠条；
+   *      已经集齐 -> **只**返 fullTickets 张券，**不攒欠条**（用户原话：
+   *      「如果已经拥有同品质的全部红碎，则只返还 20 张抽卡券，没有下次必出的补偿」）。
+   *   ③ 判「还有没有可补的卡」时看的是**这一批抽完之后**的状态（`applyBatchToState`），
+   *      所以「这一批刚好凑齐」也能当场折成券，不会拖到下一次。
+   *
+   * @returns {{tickets:number, hits:Array, armed:Object, pity:Object,
+   *            full:Array<string>, converted:Array<string>, idle:Array<string>}}
+   *   tickets  ：这一批该返还几张券（两类都算进去了）
+   *   armed    ：这一批新攒的欠条（稀有度 -> 次数）
+   *   pity     ：加上欠条、去掉折价之后**完整的**未决表（调用方直接持久化它）
+   *   full     ：这一批因为「已集齐」而按 fullTickets 结算的档位
+   *   converted：其中来自**旧欠条**的那些（界面用来说明「欠条折成券了」）
+   *   idle     ：仍欠着但没有可补目标的档位（正常流程下应为空，留作数据被手改时的痕迹）
+   */
+  function shatterCompAfter(data, pool, player, results) {
+    var comp = shatterComp(data)
+    var pity = shatterPity(data, player)
+    var hits = dupShatters(data, player, results)
+    var armed = {}
+    var full = []
+    var converted = []
+    var tickets = 0
+    if (!comp.enabled) return { tickets: 0, hits: [], armed: {}, pity: pity, full: [], converted: [], idle: [] }
+    // 判「还有没有可补的卡」用的是抽完之后的状态
+    var after = applyBatchToState(player, results)
+    /**
+     * 这一批里**刚刚兑现过**的档位与次数（补偿是替换结果里的某一张，带 `compensation` 标记）。
+     *
+     * ⚠️ 必须排除它们，否则会出现「补了一张卡 + 又折 20 张券」的双重补偿：
+     * 那张补偿卡自己就把这一档最后一张缺的红碎填上了 —— 从「抽完之后」看，
+     * 这一档已经集齐、旧欠条似乎兑现不了，于是又被折价一次。
+     */
+    var fulfilled = {}
+    for (var fi = 0; fi < (results || []).length; fi++) {
+      var fr = results[fi]
+      if (!fr || !fr.compensation) continue
+      var frid = fr.rarityId || (fr.card && fr.card.rarity) || ''
+      if (frid) fulfilled[frid] = (fulfilled[frid] || 0) + 1
+    }
+
+    // ① 旧欠条：兑现不了就折成券；刚刚兑现过的那几张从表里划掉（它们已经还清了）
+    for (var k in pity) {
+      if (!Object.prototype.hasOwnProperty.call(pity, k)) continue
+      if (fulfilled[k]) {
+        pity[k] = Number(pity[k]) - fulfilled[k]
+        if (!(pity[k] > 0)) delete pity[k]
+        continue
+      }
+      if (shatterTargets(data, pool, k, after).length) continue
+      tickets += comp.fullTickets
+      full.push(k)
+      converted.push(k)
+      delete pity[k]
+    }
+
+    // ② 这一轮新命中的
+    // 同一档位一次结算里可能有好几张：每攒一张就消耗掉一个候选目标，
+    // 否则「只有一张可补」时会计出两张兑现不了的欠条。
+    var left = {}
+    for (var i = 0; i < hits.length; i++) {
+      var rid = hits[i].rarityId
+      if (!rid) continue
+      if (left[rid] === undefined) left[rid] = shatterTargets(data, pool, rid, after).length
+      if (left[rid] <= 0) {
+        // 已经集齐：只返 fullTickets，且不攒欠条
+        tickets += comp.fullTickets
+        if (full.indexOf(rid) < 0) full.push(rid)
+        continue
+      }
+      left[rid] -= 1
+      tickets += comp.tickets
+      armed[rid] = (armed[rid] || 0) + 1
+    }
+    for (var k2 in armed) pity[k2] = Number(pity[k2] || 0) + armed[k2]
+
+    // ③ 兜底：万一还有欠着却补不了的（数据被手改过），点名出来
+    var idle = []
+    for (var k3 in pity) {
+      if (!Object.prototype.hasOwnProperty.call(pity, k3)) continue
+      if (!shatterTargets(data, pool, k3, after).length) idle.push(k3)
+    }
+    return { tickets: tickets, hits: hits, armed: armed, pity: pity, full: full, converted: converted, idle: idle }
+  }
+
+  /**
+   * 这一次抽卡要占几个补偿位置（**只有十连才兑现** —— 用户说的是「下次十连」）。
+   *
+   * 档位从高到低排队：欠着 SP 就先补 SP。
+   * @returns {{slots:Array<{rarityId:string,count:number}>, idle:Array<string>}}
+   *   idle：欠着但这一档已经没有可补目标的档位（欠条留着，界面要说清）
+   */
+  function shatterPitySlots(data, pool, player, count) {
+    var pity = shatterPity(data, player)
+    var out = []
+    var idle = []
+    var left = Math.max(0, Math.floor(Number(count) || 0))
+    var ids = []
+    for (var k in pity) if (Object.prototype.hasOwnProperty.call(pity, k)) ids.push(k)
+    // 档位从高到低（表已按 rank 升序，倒着走就是高到低）
+    var order = ((data && data.rarities) || []).map(function (r) { return r.id })
+    ids.sort(function (a, b) { return order.indexOf(b) - order.indexOf(a) })
+    for (var i = 0; i < ids.length && left > 0; i++) {
+      var rid = ids[i]
+      var available = shatterTargets(data, pool, rid, player).length
+      if (!available) {
+        idle.push(rid)
+        continue
+      }
+      var n = Math.min(pity[rid], left, available)
+      if (n > 0) {
+        out.push({ rarityId: rid, count: n })
+        left -= n
+      }
+    }
+    return { slots: out, idle: idle }
+  }
+
+  // -------------------------------------------------------------------------
   // 核心
   // -------------------------------------------------------------------------
 
@@ -634,6 +901,13 @@
       }
     }
 
+    var idx = indexes(data, pool)
+    /**
+     * 红碎补偿：**只有十连才兑现**（用户说的是「下次十连」）。
+     * 单抽不动欠条 —— 否则「下次十连必出」会变成「下次单抽就出掉了」。
+     */
+    var compPlan = count >= 10 ? shatterPitySlots(data, pool, data.player, count) : { slots: [], idle: [] }
+
     var results = []
     // 追梦计数在这一轮里**逐抽推进**：每一抽都用「到目前为止的计数」算权重，
     // 抽到 SP 就归零。只在轮末算一次的话，一轮十连里后九抽用的都是旧概率 ——
@@ -660,6 +934,7 @@
     // 十连保底：count >= 10 时，若这一轮里没有任何一张达到保底档，
     // 把**最后一张**替换成保底档的一张（而不是整轮重抽 —— 重抽会让前面
     // 已经看到的动画失效，而且消耗的随机数不一样，结果不可复现）。
+    var guaranteedIdx = -1
     if (count >= 10 && guaranteeRank >= 0) {
       var best = -1
       for (var m = 0; m < results.length; m++) {
@@ -691,6 +966,51 @@
               '本应在十连里保底 ' + guarantee + '，但这一档在池子里没有可抽的卡（没卡或权重为 0），已退到 ' + forced.rarityId
           }
           results[results.length - 1] = forced
+          guaranteedIdx = results.length - 1
+        }
+      }
+    }
+
+    /**
+     * 红碎补偿：把欠条兑现成**具体的卡**。
+     *
+     * 与十连保底同一套做法 —— 替换结果里的某一张，而不是整轮重抽
+     *（重抽会让前面已经演过的动画失效，随机数消耗也不一样，结果不可复现）。
+     *
+     * ⚠️ 位置从后往前挑，**跳过十连保底那一张**：保底是配置里的硬承诺，
+     * 被补偿挤掉就等于「保底没生效」，而 UI 还会宣称它生效了。
+     * ⚠️ 强制 `finish: 'shatter'`：欠条承诺的是「未拥有的红碎」，
+     * 只给卡不给工艺的话，等于什么都没补。
+     */
+    var compensation = []
+    var pityAfter = shatterPity(data, data.player)
+    if (compPlan.slots.length) {
+      var slotIdx = results.length - 1
+      for (var cs = 0; cs < compPlan.slots.length; cs++) {
+        var plan = compPlan.slots[cs]
+        // 候选每兑现一张就少一张（同一轮里不会补出两张一模一样的欠条）
+        var targets = shatterTargets(data, pool, plan.rarityId, data.player)
+        for (var ct = 0; ct < plan.count; ct++) {
+          while (slotIdx >= 0 && (slotIdx === guaranteedIdx || (results[slotIdx] && results[slotIdx].compensation))) slotIdx--
+          if (slotIdx < 0 || !targets.length) break
+          var pickAt = Math.floor(rng() * targets.length) % targets.length
+          var pickId = targets.splice(pickAt, 1)[0]
+          var compCard = idx.byId[pickId]
+          if (!compCard) break
+          results[slotIdx] = {
+            ok: true,
+            card: compCard,
+            rarityId: compCard.rarity,
+            forced: 'shatter-comp',
+            guaranteed: false,
+            finish: 'shatter',
+            dream: dreamOn,
+            compensation: true,
+          }
+          compensation.push({ cardId: compCard.id, rarityId: compCard.rarity, index: slotIdx })
+          pityAfter[plan.rarityId] = Math.max(0, Number(pityAfter[plan.rarityId] || 0) - 1)
+          if (!pityAfter[plan.rarityId]) delete pityAfter[plan.rarityId]
+          slotIdx--
         }
       }
     }
@@ -711,6 +1031,12 @@
       spPity: { active: spAfter.active, changed: spAfter.changed },
       dreamSteps: dreamAfter ? dreamAfter.steps : null,
       dreamReset: dreamAfter ? dreamAfter.reset : false,
+      /** 红碎补偿：这一轮兑现了哪些欠条（空数组 = 没有欠条或没兑现） */
+      compensation: compensation,
+      /** 兑现之后剩下的欠条（调用方直接持久化） */
+      shatterPity: pityAfter,
+      /** 欠着、但这一档已经没有可补目标的档位（界面要说清，别让人以为被吞了） */
+      shatterPityIdle: compPlan.idle,
     }
   }
 
@@ -1149,6 +1475,15 @@
     foilRoll: foilRoll,
     foilsAfter: foilsAfter,
     foilCollection: foilCollection,
+    // 红碎补偿（重复红碎 -> 返券 + 下次十连必出同档未拥有的红碎）
+    shatterComp: shatterComp,
+    hasShatter: hasShatter,
+    shatterPity: shatterPity,
+    shatterTargets: shatterTargets,
+    dupShatters: dupShatters,
+    shatterCompAfter: shatterCompAfter,
+    shatterPitySlots: shatterPitySlots,
+    applyBatchToState: applyBatchToState,
     // 追梦池（动态概率）
     dreamConfig: dreamConfig,
     dreamAvailable: dreamAvailable,

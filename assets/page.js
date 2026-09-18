@@ -1259,6 +1259,18 @@
     return (b / 1048576).toFixed(1) + ' MB'
   }
 
+  /**
+   * 缓存里现在有什么。
+   *
+   * ⚠️ **跨域镜像的条目读不出字节数**：`fetch(..., {mode:'no-cors'})` 拿回来的是
+   * opaque 响应，浏览器按设计不让你读它的 body —— `blob()` 会给出 0 字节。
+   * 第一版把那些 0 直接累加，于是对话框写着「已缓存 270 张 / 0 B」，
+   * 看起来像缓存坏了（用户就是这么报的）。所以这里**分开统计**：
+   *   · `readable`：同源（或 CORS 可用）的条目，大小可信 -> 累加进 `bytes`
+   *   · `opaque`  ：读不出大小的条目（镜像），只数个数，**绝不假装它是 0 字节**
+   *
+   * @returns {Promise<{count:number, bytes:number, readable:number, opaque:number}|null>}
+   */
   function imgCacheStats() {
     if (!cacheSupported()) return Promise.resolve(null)
     return caches
@@ -1269,19 +1281,32 @@
             return cache
               .match(req)
               .then(function (res) {
-                if (!res) return 0
+                if (!res) return { bytes: 0, opaque: true }
+                // opaque 连类型都不可靠，先按类型判掉，免得白读一次 body
+                if (res.type === 'opaque' || res.type === 'opaqueredirect') return { bytes: 0, opaque: true }
                 return res
                   .clone()
                   .blob()
-                  .then(function (b) { return b.size })
-                  .catch(function () { return 0 })
+                  .then(function (b) {
+                    // blob 读出来是 0 字节但响应本身不是空 —— 只可能是 opaque 的变体
+                    return { bytes: b && b.size ? b.size : 0, opaque: !(b && b.size) }
+                  })
+                  .catch(function () { return { bytes: 0, opaque: true } })
               })
-              .catch(function () { return 0 })
+              .catch(function () { return { bytes: 0, opaque: true } })
           })
-          return Promise.all(jobs).then(function (sizes) {
+          return Promise.all(jobs).then(function (rows) {
             var total = 0
-            for (var i = 0; i < sizes.length; i++) total += sizes[i]
-            return { count: keys.length, bytes: total }
+            var readable = 0
+            var opaque = 0
+            for (var i = 0; i < rows.length; i++) {
+              if (rows[i].opaque) opaque++
+              else {
+                readable++
+                total += rows[i].bytes
+              }
+            }
+            return { count: keys.length, bytes: total, readable: readable, opaque: opaque }
           })
         })
       })
@@ -1320,6 +1345,37 @@
   }
 
   /**
+   * 镜像站支不支持 CORS？**一次探测，整批复用。**
+   *
+   * 为什么值得探：跨域图片只有两种抓法，效果差别很大 ——
+   *   · `mode: 'cors'`  -> 响应可读（能报出大小、类型），但镜像必须放行 CORS
+   *   · `mode: 'no-cors'` -> 一定抓得到，但拿到的是 opaque：**读不出大小**，
+   *     于是缓存对话框只能报「N 张（大小不可读）」（用户看到「0 B」就是这么来的）
+   * 所以：先拿站点里第一张镜像图试一次 CORS，能行就整批走 CORS（大小可读），
+   * 不行就整批 no-cors。只探一次 —— 每张都试会白白多出一倍的失败请求 + 一堆
+   * Console 报错。
+   *
+   * 探测结果按 base 缓存在内存里（一次打开只探一次）。
+   */
+  var corsProbe = {}
+  function mirrorCorsOk(sampleUrl) {
+    var key = String(sampleUrl || '').replace(/[^/]*$/, '')
+    if (corsProbe[key] !== undefined) return Promise.resolve(corsProbe[key])
+    if (typeof fetch !== 'function') return Promise.resolve(false)
+    return fetch(sampleUrl, { mode: 'cors', credentials: 'omit', cache: 'force-cache' })
+      .then(function (res) {
+        // 只有真的能读到内容才算「可用」：opaque 说明 CORS 没放行
+        var ok = !!res && res.type !== 'opaque' && (res.ok || res.type === 'cors')
+        corsProbe[key] = ok
+        return ok
+      })
+      .catch(function () {
+        corsProbe[key] = false
+        return false
+      })
+  }
+
+  /**
    * 把图片抓进缓存。
    *
    * **限并发 4**：一次丢出 130+ 个请求会把带宽抢光（页面自己的请求也会被挤掉），
@@ -1340,53 +1396,61 @@
     if (!cacheSupported()) return Promise.resolve({ ok: false, error: '这个浏览器不支持 Cache Storage' })
     var urls = allImageUrls()
     if (!urls.length) return Promise.resolve({ ok: true, done: 0, total: 0, checked: 0, skipped: 0, failed: 0 })
-    return caches
-      .open(IMG_CACHE)
-      .then(function (cache) {
-        var pick = force
-          ? Promise.resolve(urls.slice())
-          : Promise.all(
-              urls.map(function (u) {
-                return cache
-                  .match(absUrl(u))
-                  .then(function (r) { return r ? null : u })
-                  .catch(function () { return u })
+    // 跨域的那些：先探一次 CORS，决定整批用哪种模式
+    var crossSamples = urls.filter(isCrossOrigin)
+    var corsReady = crossSamples.length ? mirrorCorsOk(crossSamples[0]) : Promise.resolve(false)
+    return corsReady.then(function (useCors) {
+      return caches
+        .open(IMG_CACHE)
+        .then(function (cache) {
+          var pick = force
+            ? Promise.resolve(urls.slice())
+            : Promise.all(
+                urls.map(function (u) {
+                  return cache
+                    .match(absUrl(u))
+                    .then(function (r) { return r ? null : u })
+                    .catch(function () { return u })
+                })
+              ).then(function (miss) {
+                return miss.filter(Boolean)
               })
-            ).then(function (miss) {
-              return miss.filter(Boolean)
-            })
-        return pick.then(function (todo) {
-          if (!todo.length) {
-            return { ok: true, done: 0, total: urls.length, checked: 0, skipped: urls.length, failed: 0 }
-          }
-          var idx = 0
-          var done = 0
-          var failed = 0
-          var CONCURRENCY = 4
-          var worker = function () {
-            if (idx >= todo.length) return Promise.resolve()
-            var u = todo[idx++]
-            var init = { credentials: 'same-origin' }
-            // 跨域镜像：必须 no-cors（它没有 CORS 头），拿回来的是一个 opaque 响应。
-            // 读不到内容是正常的 —— 我们只是把它原样存进缓存，之后由 <img> 自己去解码。
-            // 不带凭证也是对的：公开镜像不需要 cookie，带上反而会让请求变成非简单请求。
-            if (isCrossOrigin(u)) {
-              init.mode = 'no-cors'
-              init.credentials = 'omit'
+          return pick.then(function (todo) {
+            if (!todo.length) {
+              return { ok: true, done: 0, total: urls.length, checked: 0, skipped: urls.length, failed: 0, cors: useCors }
             }
-            if (force) init.cache = 'reload'
-            return fetch(u, init)
-              .then(function (res) {
-                // opaque 也算成功：Cache Storage 允许存不透明响应，
-                // 这正是「跨域图片也能一次抓好、之后离线可见」的依据。
-                if (res && (res.ok || res.type === 'opaque')) {
-                  return cache.put(absUrl(u), res.clone()).then(function () { done++ })
-                }
-                failed++
-                return null
-              })
-              .catch(function () { failed++ })
-              .then(function () {
+            var idx = 0
+            var done = 0
+            var failed = 0
+            var CONCURRENCY = 4
+            var worker = function () {
+              if (idx >= todo.length) return Promise.resolve()
+              var u = todo[idx++]
+              var init = { credentials: 'same-origin' }
+              var cross = isCrossOrigin(u)
+              if (cross) {
+                // 跨域镜像：能 CORS 就 CORS（大小可读），否则退 no-cors（拿 opaque，
+                // 照样能缓存、能显示，只是读不出大小 —— 见 imgCacheStats）。
+                // 不带凭证是对的：公开镜像不需要 cookie，带上反而会变成非简单请求。
+                init.mode = useCors ? 'cors' : 'no-cors'
+                init.credentials = 'omit'
+              }
+              if (force) init.cache = 'reload'
+              return fetch(u, init)
+                .then(function (res) {
+                  // opaque 也算成功：Cache Storage 允许存不透明响应，
+                  // 这正是「跨域图片也能一次抓好、之后离线可见」的依据。
+                  if (res && (res.ok || res.type === 'opaque')) {
+                    return cache.put(absUrl(u), res.clone()).then(function () { done++ })
+                  }
+                  failed++
+                  return null
+                })
+                .catch(function () {
+                  failed++
+                  return null
+                })
+                .then(function () {
                 if (onProgress) onProgress(done + failed, todo.length)
                 return worker()
               })
@@ -1401,13 +1465,15 @@
               checked: todo.length,
               skipped: urls.length - todo.length,
               failed: failed,
+              cors: useCors,
             }
           })
         })
-      })
-      .catch(function (err) {
-        return { ok: false, error: (err && err.message) || '缓存失败' }
-      })
+        })
+        .catch(function (err) {
+          return { ok: false, error: (err && err.message) || '缓存失败' }
+        })
+    })
   }
 
   var cacheBusy = false
@@ -1533,8 +1599,27 @@
         stat.textContent = '读不到缓存状态（浏览器可能禁用了存储）。'
         return
       }
-      stat.textContent = '已缓存 ' + s.count + ' 张 / ' + fmtBytes(s.bytes) + '（本站共 ' + total + ' 张图片）'
+      stat.textContent = cacheStatLine(s, total)
     })
+  }
+
+  /**
+   * 状态行那句话。三种情况分开写，**绝不把「读不出大小」说成「0 字节」**：
+   *   · 全是同源（没有镜像）：照旧报大小
+   *   · 有镜像条目：数量照报，读不出大小的那些单独说一句
+   *   · 只有镜像条目：只报数量 + 说明
+   */
+  function cacheStatLine(s, total) {
+    var head = '已缓存 ' + s.count + ' / ' + total + ' 张'
+    if (!s.opaque) return head + '（' + fmtBytes(s.bytes) + '）'
+    if (!s.readable) {
+      return head + '（其中 ' + s.opaque + ' 张来自镜像；浏览器按安全策略不允许读取它们的大小）'
+    }
+    return (
+      head +
+      '：同源 ' + s.readable + ' 张 ' + fmtBytes(s.bytes) +
+      ' + 镜像 ' + s.opaque + ' 张（大小不可读）'
+    )
   }
 
   function doCacheAll() {
@@ -1831,7 +1916,11 @@
     }
     // 追梦池的重复卡**不返碎片、改返点数**（用户要求：不论品质 1 点，
     // 平闪/全闪/红碎额外 +1/+2/+5）—— 规则在 shards.js，两条路共用同一份。
-    var settle = sh.settleDraw(dataWithState(), result.results, { reward: on ? 'points' : 'shards' })
+    // 红碎补偿（重复红碎 -> 返券 + 攒欠条）也在这份结算里，规则本体在 draw.js。
+    var settle = sh.settleDraw(dataWithState(), result.results, { reward: on ? 'points' : 'shards', poolId: pool.id })
+    if (settle.shatterCompMissing) {
+      console.warn('[gacha] 红碎补偿没有结算：draw.js 的 shatterCompAfter 不可用')
+    }
 
     // 保底计数（自上次出最高档起算）
     var topId = topRarity() ? topRarity().id : ''
@@ -1853,6 +1942,26 @@
     if (settle.gainedPoints > 0) {
       local.points = Math.max(0, Number(local.points || 0)) + Number(settle.gainedPoints)
     }
+    // 红碎补偿返还的抽卡券（用户要求：抽到已有的红碎返 10 张券）
+    if (Number(settle.tickets || 0) > 0) {
+      local.currency = Math.max(0, Number(local.currency || 0)) + Number(settle.tickets)
+    }
+    // 红碎补偿的欠条：**三张表要合起来看**。
+    //   · draw.js 的 result.shatterPity  = 抽之前那张表 **减去**这一轮兑现掉的
+    //   · shards.js 的 settle.shatterConverted = 兑现不了、被**折成券**的那些（要从表里删掉）
+    //   · shards.js 的 settle.shatterArmed     = 这一轮**新攒**的
+    // 少合一边都会出错：只取 settle 会出现「补过了却还欠着」；只取 draw 则新攒的
+    // 记不上、折过价的还留着（那正是「程序卡死」的样子）。第一版就漏了折价这一边。
+    var pityNext = result.shatterPity ? Object.assign({}, result.shatterPity) : Object.assign({}, local.shatterPity || {})
+    var convertedNow = settle.shatterConverted || []
+    for (var ci = 0; ci < convertedNow.length; ci++) delete pityNext[convertedNow[ci]]
+    var armedNow = settle.shatterArmed || {}
+    for (var ak in armedNow) {
+      if (Object.prototype.hasOwnProperty.call(armedNow, ak)) {
+        pityNext[ak] = Number(pityNext[ak] || 0) + Number(armedNow[ak] || 0)
+      }
+    }
+    local.shatterPity = pityNext
     local.pulls = Number(local.pulls || 0) + result.results.length
     local.sinceTop = sinceTop
     local.owned = settle.owned
@@ -1919,6 +2028,7 @@
       spPity: local.spPity,
       foils: local.foils,
       dream: local.dream,
+      shatterPity: local.shatterPity,
       currency: local.currency,
       points: local.points,
       lastGift: local.lastGift,
@@ -1941,6 +2051,8 @@
           shards: Number(pc.shards || 0),
           // 这一张的工艺（空串 = 普通）：结果格子与动画都要按它来显示
           finish: foilId(item.finish),
+          // 红碎补偿补出来的那一张（结果格子上要标一下，否则读者不知道为什么多了张红碎）
+          compensation: !!item.compensation,
         }
       }),
     }
@@ -1975,6 +2087,35 @@
       if (fid) foilHit = fid
     }
     if (foilHit) toastText += ' · 特殊工艺：' + foilLabel(foilHit)
+
+    // 红碎补偿：抽到已有的红碎 -> 返券 + 欠条；这一轮兑现了欠条也要说清
+    //（这套机制不写在脸上就等于不存在，读者只会觉得「红碎怎么又给我一张」）
+    if (Number(settle.tickets || 0) > 0) {
+      toastText += ' · 红碎补偿：+' + fmt(settle.tickets) + ' 张抽卡券'
+    }
+    // 「这一档红碎已集齐」时按折价返还、不给欠条（用户要求：防止程序卡死）
+    var fullNow = settle.shatterFull || []
+    if (fullNow.length) {
+      var fullLabels = fullNow.map(function (r) { return (rarityById(r) || {}).label || r })
+      var converted = settle.shatterConverted || []
+      toastText +=
+        ' · ' + fullLabels.join(' / ') + ' 的红碎已经集齐：' +
+        (converted.length ? '原欠的必出改成' : '改为') + '返还 ' + fmt(shatterCompCfg().fullTickets) + ' 张券（不再欠必出）'
+    }
+    if (result.compensation && result.compensation.length) {
+      var compLabels = result.compensation.map(function (c) {
+        return (rarityById(c.rarityId) || {}).label || c.rarityId
+      })
+      toastText += ' · 兑现红碎补偿 ' + result.compensation.length + ' 张（' + compLabels.join(' / ') + '）'
+    }
+    var idlePity = result.shatterPityIdle || []
+    if (idlePity.length) {
+      // 正常流程下走不到这里（结算时会把兑现不了的欠条折成券）——
+      // 真出现了说明数据被手改过，必须点名
+      toastText +=
+        ' · 注意：' + idlePity.map(function (r) { return (rarityById(r) || {}).label || r }).join(' / ') +
+        ' 的欠条没有可补偿的目标（会在下次结算时折算成券）'
+    }
 
     // 追梦池：把「SP 涨到多少 / 刚刚重置」说出来 ——
     // 这套机制不写在脸上就等于不存在（读者只会觉得「概率好像不太对」）
@@ -2052,6 +2193,9 @@
           spPity: local.spPity,
           // 追梦计数同理（服务端不判抽卡，只记账）
           dream: local.dream || {},
+          // 红碎补偿的欠条：与 spPity 同理，**整张表**送上去（服务端不判抽卡，
+          // 它自己算会算漏「这一轮兑现掉的」那一半）
+          shatterPity: local.shatterPity || {},
           mode: on ? 'dream' : 'normal',
           results: result.results.map(function (item) {
             return { cardId: item.card.id, finish: foilId(item.finish) }
@@ -2114,6 +2258,56 @@
   // ⑥ 板块：抽卡
   // -------------------------------------------------------------------------
 
+  /**
+   * 红碎补偿的配置（页面侧只读一份，用于文案里的数字）。
+   * 规则本体在 draw.js 的 `shatterComp`，这里不另算一套口径。
+   */
+  function shatterCompCfg() {
+    var g = G()
+    if (g && typeof g.shatterComp === 'function') return g.shatterComp(state.data)
+    return { enabled: true, tickets: 10, fullTickets: 20 }
+  }
+
+  /**
+   * 「红碎补偿」的欠条提示（抽卡页顶栏那个 pill）。
+   *
+   * 用户 2026-09-19：抽到已经有了的红碎会返券，**并且**下次十连必出一张同档、
+   * 自己还没有红碎的卡。欠条是按档位记次数的，所以这里把每一档都写出来。
+   *
+   * 一条都没有时返回 null（不渲染一个空的 pill）。
+   */
+  function shatterPityPill() {
+    var g = G()
+    var pool = currentPool()
+    if (!g || typeof g.shatterPity !== 'function' || !pool) return null
+    var pity = g.shatterPity(null, player())
+    var parts = []
+    for (var k in pity) {
+      if (!Object.prototype.hasOwnProperty.call(pity, k)) continue
+      var label = (rarityById(k) || {}).label || k
+      parts.push(label + ' ×' + pity[k])
+    }
+    if (!parts.length) return null
+    // 兜底说明：正常流程下欠条不会「补不了」（结算时会把兑现不了的折成券，
+    // 见 draw.js 的 shatterCompAfter），所以这句只在数据被手改过时才会出现
+    var idle = []
+    for (var k2 in pity) {
+      if (!Object.prototype.hasOwnProperty.call(pity, k2)) continue
+      var have = g.shatterTargets ? g.shatterTargets(dataWithState(), pool, k2, player()).length : 1
+      if (!have) idle.push((rarityById(k2) || {}).label || k2)
+    }
+    return el('span', {
+      class: 'pill pill-comp',
+      text: '红碎补偿：' + parts.join('、') + '（下次十连必出）',
+      title:
+        '你抽到过已经有了的红碎，所以欠你这几张「必定是未拥有的红碎」——' +
+        '会在下一次**十连**里兑现，单抽不消耗欠条。' +
+        (idle.length
+          ? ' 注意：' + idle.join(' / ') + ' 的红碎已经集齐，这张欠条会在下次结算时折算成 ' + shatterCompCfg().fullTickets + ' 张券。'
+          : ''),
+    })
+  }
+
   function viewDraw() {
     var g = G()
     var view = state.els.view
@@ -2138,6 +2332,9 @@
               title: '你已经抽到过重复的 SP，而本池的 SP 还没集齐 —— 已拥有的 SP 暂时不在抽取范围内，直到下次抽出 SP 为止',
             })
           : null,
+        // 红碎补偿的欠条：欠着就写清楚「下次十连必出哪一档的红碎」——
+        // 不显示的话，读者只会觉得「上次说会补，怎么没动静」
+        shatterPityPill(),
       ])
     )
 
@@ -2337,6 +2534,17 @@
           holder.classList.add('result-dup')
         }
         if (item.guaranteed) holder.appendChild(el('div', { class: 'badge-guarantee', text: '保底' }))
+        // 红碎补偿补出来的那一张：标出来，否则读者只会觉得「怎么突然多了张红碎」
+        if (item.compensation) {
+          holder.appendChild(
+            el('div', {
+              class: 'badge-comp',
+              text: '红碎补偿',
+              title: '你之前抽到过已经有了的红碎，所以这一张按补偿规则必定是「你还没有的红碎」',
+            })
+          )
+          holder.classList.add('result-comp')
+        }
         if (item.guaranteed === false && item.forced === 'tenpull-fallback') {
           // 保底档在池子里抽不出来 —— 如实说明，不假装保底成功
           holder.appendChild(el('div', { class: 'badge-note', text: '保底档不可抽', title: item.guaranteeNote }))
@@ -4525,6 +4733,31 @@
       ])
     )
 
+    // --- 红碎补偿 ---------------------------------------------------------
+    // 用户 2026-09-19：「抽到已经有了的红碎 -> 返 10 张抽卡券 + 下次十连必出
+    // 一张同品质的未拥有红碎」。返券数写成可配（0 = 只给欠条不给券）。
+    var scCfg = s.shatterComp || {}
+    wrap.appendChild(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'panel-title', text: '③-6 红碎补偿' }),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '抽到**已经有了的红碎**时：返下面这个数量的抽卡券，并且欠你一张「下次十连必出的、' +
+            '同档位且你还没有的红碎」。UR 的红碎欠 UR，SP 的红碎欠 SP。' +
+            '如果这一档的红碎**已经集齐**（给不出未拥有的了），就改按「已集齐时返还」那个数量返券，不再欠必出 —— ' +
+            '这是为了防止欠条永远兑现不了。',
+        }),
+        field('启用', select(['true', 'false'], String(scCfg.enabled !== false), 'comp-on')),
+        field('每次返还几张抽卡券', input('number', scCfg.tickets === undefined ? 10 : scCfg.tickets, 'comp-tickets')),
+        field('这一档红碎已集齐时返还几张', input('number', scCfg.fullTickets === undefined ? 20 : scCfg.fullTickets, 'comp-full-tickets')),
+        el('div', { class: 'panel-actions' }, [
+          el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-comp' }, ['保存红碎补偿']),
+        ]),
+        el('p', { class: 'panel-hint', text: '欠条是按档位记次数的；单抽不会消耗欠条（用户说的是「下次十连」）。' }),
+      ])
+    )
+
     // --- 秘钥 -------------------------------------------------------------
     wrap.appendChild(
       el('div', { class: 'panel' }, [
@@ -4800,6 +5033,42 @@
         }
         request('/links.json', { method: 'POST', body: { links: list } })
           .then(function (res) { afterWrite(res, '链接已保存（' + list.length + ' 条）') })
+          .catch(fail)
+      })
+    }
+
+    var saveComp = q('save-comp')
+    if (saveComp) {
+      saveComp.addEventListener('click', function () {
+        var readNum = function (bind, fallback) {
+          var node = q(bind)
+          var v = node ? String(node.value).trim() : ''
+          if (v === '') return fallback
+          var n = Number(v)
+          return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null
+        }
+        var n = readNum('comp-tickets', 10)
+        var full = readNum('comp-full-tickets', 20)
+        if (n === null) {
+          window.alert('返还的抽卡券要写成 0 或正整数，现在是：' + (q('comp-tickets') ? q('comp-tickets').value : ''))
+          return
+        }
+        if (full === null) {
+          window.alert('「已集齐时返还」要写成 0 或正整数，现在是：' + (q('comp-full-tickets') ? q('comp-full-tickets').value : ''))
+          return
+        }
+        var sel = q('comp-on')
+        request('/settings.json', {
+          method: 'POST',
+          body: {
+            shatterComp: {
+              enabled: sel ? sel.value !== 'false' : true,
+              tickets: n,
+              fullTickets: full,
+            },
+          },
+        })
+          .then(function (res) { afterWrite(res, '红碎补偿已保存') })
           .catch(fail)
       })
     }
@@ -5910,11 +6179,35 @@
     if (e.footMeta) {
       var stats = d.stats || {}
       var total = stats.total !== undefined ? stats.total : d.cards.length
+      /**
+       * 图片镜像的**可见痕迹**。
+       *
+       * 为什么写在页脚：镜像基址存在数据里（`settings.imageMirror`，后台可改），
+       * 代码里**没有**硬编码的常量 —— 于是「镜像还在不在」只能靠数据回答。
+       * 作者看代码 diff 时会以为「镜像被删了」，读者也无从判断自己看到的图
+       * 是从哪来的。页脚这一句把当前生效的镜像主机写出来，一眼可查。
+       * 只在**真的生效**时显示（静态站）：动态站读本机磁盘，根本没有镜像。
+       */
+      var mirrorHost = ''
+      if (!BACKEND) {
+        var bases = mirrorBases()
+        if (bases.length) {
+          try {
+            mirrorHost = ' · 图片镜像 ' + new URL(bases[0]).host
+          } catch (err) {
+            mirrorHost = ''
+          }
+        }
+      }
       e.footMeta.textContent =
         (BACKEND ? '本机 DSH' : '静态站（只读）') +
         ' · 卡牌 ' + total + ' 张' +
         (stats.playable !== undefined && stats.playable !== total ? '（可抽 ' + stats.playable + '）' : '') +
+        mirrorHost +
         (state.warning ? ' · ⚠ ' + state.warning : '')
+      e.footMeta.title = mirrorHost
+        ? '卡面从 ' + mirrorBases()[0] + ' 读取；这里取不到时会逐级回退到回退基址与站内地址'
+        : ''
     }
 
     if (e.warning) {

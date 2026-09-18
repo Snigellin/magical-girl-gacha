@@ -479,8 +479,17 @@
    *   @param {'shards'|'points'} [opts.reward='shards'] 重复卡返什么：
    *     普通池返**碎片**（按稀有度），追梦池返**点数**（用户要求：
    *     「不论品质均为 1 点，面闪/全闪/红碎额外返还 1/2/5 点」）。
+   *   @param {string} [opts.poolId] 这一批是哪个池子抽的。红碎补偿要靠它
+   *     找出「这一档还有哪些卡没拿到红碎」（只算这个池子抽得到的卡）。
    * @returns {{owned, shards, duplicates, newCards:Array, duplicateCards:Array,
-   *            gainedShards:Object, gainedPoints:number, perCard:Array, reward:string}}
+   *            gainedShards:Object, gainedPoints:number, perCard:Array, reward:string,
+   *            tickets:number, shatterHits:Array, shatterPity:Object|null,
+   *            shatterFull:Array, shatterConverted:Array, shatterIdle:Array,
+   *            shatterCompMissing?:boolean}}
+   *   `tickets` 是红碎补偿返还的抽卡券；`shatterPity` 是**加上欠条之后完整的**
+   *   未决表（调用方直接持久化整张表，别自己算增量）。
+   *   `shatterFull` 是这一批「这一档红碎已集齐、按折价返还」的档位，
+   *   `shatterConverted` 是其中来自旧欠条的那些（界面要说清欠条折成券了）。
    */
   function settleDraw(data, results, opts) {
     opts = opts || {}
@@ -528,6 +537,34 @@
       perCard.push({ card: card, rarity: rarity, duplicate: isDuplicate, shards: gained, points: points })
     }
 
+    /**
+     * 红碎补偿（用户 2026-09-19）：抽到「已经有了的红碎」时返券 + 攒一张欠条
+     *（下次十连必出同档、自己还没有红碎的卡）。
+     *
+     * ⚠️ 规则本体在 `page/draw.js`（`shatterCompAfter`）—— 那里才有池子成员表
+     * 与工艺判定，这里**只委托，不重写**。两份实现必然会在某次改动后分叉，
+     * 而分叉的症状是「服务端记了、页面没记」（或反过来），极难查。
+     * 委托不到时**不能假装补偿成功了**：明确标一个 missing 标志，由调用方留痕。
+     */
+    var comp = { tickets: 0, hits: [], armed: {}, pity: null, idle: [], full: [], converted: [] }
+    var compMissing = false
+    // 规则模块从两个地方取：浏览器里是全局的 Gacha；服务端里 shards.js 与 draw.js
+    // 是两个独立的 vm 沙箱，摸不到彼此的全局，所以由调用方（lib/index.js）显式传进来。
+    var g = (opts && opts.shatterApi) || (typeof globalThis !== 'undefined' && globalThis ? globalThis.Gacha : null)
+    if (g && typeof g.shatterCompAfter === 'function') {
+      var pool = null
+      var pools = (data && data.pools) || []
+      for (var pi = 0; pi < pools.length; pi++) {
+        if (pools[pi].id === opts.poolId) pool = pools[pi]
+      }
+      if (pool) {
+        var res = g.shatterCompAfter(data, pool, data && data.player, results)
+        comp = res
+      }
+    } else {
+      compMissing = true
+    }
+
     return {
       owned: owned,
       shards: shards,
@@ -538,6 +575,14 @@
       gainedPoints: gainedPoints,
       perCard: perCard,
       reward: reward,
+      tickets: comp.tickets,
+      shatterHits: comp.hits,
+      shatterPity: comp.pity,
+      shatterArmed: comp.armed,
+      shatterFull: comp.full || [],
+      shatterConverted: comp.converted || [],
+      shatterIdle: comp.idle,
+      shatterCompMissing: compMissing,
     }
   }
 
@@ -626,6 +671,9 @@
       duplicates: 0,
       spPity: {},
       dream: {},
+      // 红碎补偿的欠条也要清掉：重置之后连卡都没有了，欠着的「必出红碎」
+      // 会变成一张凭空多出来的补偿（而且新号本来就能领三张纪念卡）
+      shatterPity: {},
       foils: foils,
     }
     return { player: player, gift: gift, stats: { points: points, tickets: tickets, giftCount: gift.length } }
