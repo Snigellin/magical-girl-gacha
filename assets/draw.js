@@ -322,6 +322,17 @@
     return f.id
   })
 
+  /**
+   * HR 碎片在 `player.shards` 里的键。
+   *
+   * **与 lib/data.js 的 `HR_SHARD_RARITY` 必须一致**（那边是 ESM、浏览器加载不了，
+   * 所以只能两份；`test-plugin.mjs` 有一条断言把两边钉住）。
+   *
+   * 为什么 HR 不是「第五个档位」：档位表多一项，概率表、卡池一览、抽卡动画配色
+   * 就会各多出一档永远 0 张的幽灵档。HR 是**第四种碎片**，只在碎片表里占一个键。
+   */
+  var HR_SHARD_RARITY = 'HR'
+
   /** 档位 id -> rank（不在表里的返回 -1） */
   function rankOf(data, rarityId) {
     var list = (data && data.rarities) || []
@@ -1270,6 +1281,11 @@
    * 规则：每天（本地日期）第一次打开页面时送 `settings.daily.points` 点，
    * 一天只送一次 —— 判定靠 `player.lastGift` 这个 `YYYY-MM-DD` 字符串。
    *
+   * ⚠️ 2026-09-19 起，**这个函数不再被页面自动调用**：作者要求「每日登录赠送的
+   * 点数改为签到领取」，所以它现在只负责「今天还能不能领、基础点数是多少」，
+   * 由签到流程（`checkinState` / 页面上的签到按钮）调用。去重仍然共用
+   * `giftClaimedOn` —— 换个入口再领一次是不允许的。
+   *
    * @param {string} today `YYYY-MM-DD`（由调用方按**本地时区**算好传进来）
    * @returns {{ok:boolean, points:number, date:string, reason?:string}}
    */
@@ -1280,9 +1296,22 @@
     if (!(amount > 0)) return { ok: false, points: 0, date: '', reason: '赠送点数是 0' }
     var day = String(today || '')
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { ok: false, points: 0, date: '', reason: '日期格式不对' }
-    var p = (data && data.player) || {}
-    if (String(p.lastGift || '') === day) return { ok: false, points: 0, date: day, reason: '今天已经领过了' }
+    if (giftClaimedOn(data, day)) return { ok: false, points: 0, date: day, reason: '今天已经领过了' }
     return { ok: true, points: amount, date: day }
+  }
+
+  /**
+   * 这一天领过没有 —— **每日赠送与签到共用同一个标记**（`player.lastGift`）。
+   *
+   * 单独抽出来是因为「已经领过」这个判定有两个入口（旧的每日赠送路由、
+   * 新的签到），而两份实现迟早会分叉：分叉的症状是「换个入口又能领一次」，
+   * 也就是点数凭空翻倍，页面上完全看不出来。
+   */
+  function giftClaimedOn(data, day) {
+    var d = String(day || '')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false
+    var p = (data && data.player) || {}
+    return String(p.lastGift || '') === d
   }
 
   /** 本地时区的 `YYYY-MM-DD`（每日赠送按本地日期算，不能用 UTC —— 那会在晚上 8 点换日） */
@@ -1292,6 +1321,349 @@
       return (n < 10 ? '0' : '') + n
     }
     return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+  }
+
+  // ---------------------------------------------------------------------------
+  // 每日签到（用户 2026-09-19）
+  // ---------------------------------------------------------------------------
+  //
+  // 原话：「增加每日签到的页面，每日登录赠送的点数改为签到领取，签到按钮每天
+  //   凌晨 3 点刷新。签到的时候，会从已拥有的卡牌中随机挑选一张 UR/SP 卡牌
+  //   （纪念卡无法被抽取），根据卡牌种类获得额外点数：A 乘以 B。
+  //   A=2/5（UR/SP），B=1/2/5/15（平卡/面闪/全闪/红碎）。这个卡牌抽取结果可以
+  //   进行三次重抽，重抽后也保留原本的卡，相当于用户可以自行从四张卡中选择。」
+  //
+  // 规则全部在这里（纯函数），页面、服务端、测试共用同一份 ——
+  // 「服务端记了、页面没记」这类分叉在这个项目里踩过太多次。
+
+  /** 签到配置（缺字段时的兜底与归一化保持一致，别在两处各写一套默认值） */
+  function dailyConfig(data) {
+    var cfg = (data && data.settings && data.settings.daily) || {}
+    var rarities = Array.isArray(cfg.rarities) ? cfg.rarities.slice() : ['UR', '???']
+    // ⚠️ 缺键时的兜底必须是**文档里那个数**（UR=2 / SP=5），不能图省事写 1：
+    // 老 data.json 里根本没有 settings.daily，写 1 的话 A 会静默变成 1 倍，
+    // 也就是「UR 平卡 1 点」—— 数字合法、页面上也看不出来，只是需求没实现。
+    var rfDefaults = { UR: 2, '???': 5 }
+    var rf = {}
+    for (var i = 0; i < rarities.length; i++) {
+      var rid = rarities[i]
+      var def = rfDefaults[rid] === undefined ? 1 : rfDefaults[rid]
+      var v = cfg.rarityFactor && cfg.rarityFactor[rid]
+      rf[rid] = Math.max(0, Math.floor(Number(v === undefined ? def : v)))
+    }
+    var ff = {}
+    var kinds = [''].concat(FOIL_IDS)
+    var ffDefaults = { '': 1, flat: 2, full: 5, shatter: 15 }
+    for (var k = 0; k < kinds.length; k++) {
+      var id = kinds[k]
+      var raw = cfg.foilFactor && cfg.foilFactor[id]
+      ff[id] = Math.max(0, Math.floor(Number(raw === undefined ? ffDefaults[id] : raw)))
+    }
+    return {
+      enabled: cfg.enabled !== false,
+      points: Math.max(0, Math.floor(Number(cfg.points === undefined ? 300 : cfg.points))),
+      rerolls: Math.max(0, Math.min(20, Math.floor(Number(cfg.rerolls === undefined ? 3 : cfg.rerolls)))),
+      refreshHour: Math.max(0, Math.min(23, Math.floor(Number(cfg.refreshHour === undefined ? 3 : cfg.refreshHour)))),
+      rarities: rarities,
+      rarityFactor: rf,
+      foilFactor: ff,
+    }
+  }
+
+  /**
+   * 签到日：按 `refreshHour`（默认凌晨 3 点）切日，**不是**午夜。
+   *
+   * 做法是把时间往前挪 `refreshHour` 小时再取本地日期：于是 00:00~02:59
+   * 仍然算「前一天」，到 03:00 才换日。这样也自动处理了跨月/跨年。
+   */
+  function checkinDay(now, refreshHour) {
+    var h = Number(refreshHour)
+    if (!isFinite(h)) h = 3
+    h = Math.max(0, Math.min(23, Math.floor(h)))
+    var t = now === undefined || now === null ? Date.now() : Number(now)
+    if (!isFinite(t)) t = Date.now()
+    return localDateStr(t - h * 3600 * 1000)
+  }
+
+  /** 下一次刷新（签到换日）的时刻，给页面显示「明天凌晨 3 点刷新」用 */
+  function nextCheckinRefresh(now, refreshHour) {
+    var h = Number(refreshHour)
+    if (!isFinite(h)) h = 3
+    h = Math.max(0, Math.min(23, Math.floor(h)))
+    var t = now === undefined || now === null ? Date.now() : Number(now)
+    if (!isFinite(t)) t = Date.now()
+    var d = new Date(t)
+    var at = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, 0, 0, 0).getTime()
+    if (t >= at) at = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, h, 0, 0, 0).getTime()
+    return at
+  }
+
+  /** 名册里按 id 取卡（签到与 HR 都要用；找不到返回 null，绝不返回半个对象） */
+  function cardOf(data, cardId) {
+    var list = (data && data.cards) || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].id === cardId) return list[i]
+    }
+    return null
+  }
+
+  /**
+   * 签到候选池：**已拥有、非纪念、非隐藏、且档位在资格表里**的卡。
+   *
+   * 「纪念卡无法被抽取」是用户明确要求 —— 纪念卡是给读者的补偿，
+   * 不该再变成点数的来源；`hidden` 的卡连图鉴都不显示，也不该出现在开奖里。
+   */
+  function checkinPool(data) {
+    var cfg = dailyConfig(data)
+    var list = (data && data.cards) || []
+    var owned = ((data && data.player && data.player.owned) || {})
+    var out = []
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i]
+      if (!c || !c.id || c.hidden || c.memorial) continue
+      if (cfg.rarities.indexOf(c.rarity) < 0) continue
+      if (Number(owned[c.id] || 0) <= 0) continue
+      out.push(c)
+    }
+    return out
+  }
+
+  /**
+   * 这张卡按哪种「种类」算 B：它拥有的**最高档**工艺；一门都没有就是平卡（`''`）。
+   *
+   * 为什么要取最高档而不是随机挑一门：作者说「根据卡牌种类」，而一张卡可以同时
+   * 拥有平闪与红碎（先抽到平闪、后来又抽到红碎）。取最高档才符合直觉 ——
+   * 红碎卡不该因为「它也有一张平闪」而被按平闪算。
+   */
+  function cardKindFinish(player, cardId) {
+    var list = ((player && player.foils) || {})[cardId]
+    var best = ''
+    var bestTier = -1
+    if (Object.prototype.toString.call(list) === '[object Array]') {
+      for (var i = 0; i < list.length; i++) {
+        var t = FOIL_IDS.indexOf(list[i])
+        if (t > bestTier) {
+          bestTier = t
+          best = list[i]
+        }
+      }
+    }
+    return best
+  }
+
+  /** 额外点数 = A（档位系数）× B（工艺系数） */
+  function checkinReward(data, card, finish) {
+    var cfg = dailyConfig(data)
+    var a = Number(cfg.rarityFactor[(card && card.rarity) || ''] || 0)
+    var kind = FOIL_IDS.indexOf(finish) >= 0 ? finish : ''
+    var b = Number(cfg.foilFactor[kind] || 0)
+    return Math.max(0, Math.floor(a * b))
+  }
+
+  /**
+   * 开一张候选卡（纯函数，随机源由调用方给）。
+   *
+   * 池子为空 / 已经全部开过时返回 `null` —— 调用方据此说清原因，
+   * 而不是发一张 0 点的假候选（那看起来就像功能坏了）。
+   *
+   * @param {function} [rng] 随机源（默认 Math.random）
+   * @param {Array<string>} [exclude] 已经开出来的卡 id —— 候选**不重复**。
+   *   不去重的话，池子小的时候会出现「四张里有两张一模一样」，
+   *   而用户要的是「从四张里自己选一张」，重复的候选等于选择退化。
+   * @param {string} [only] 只要这一张。服务端校验「前端送来的候选」时用它：
+   *   不在这张的池子里就返回 `null`，**不猜、也不换成别的**。
+   */
+  function checkinRoll(data, rng, exclude, only) {
+    var pool = checkinPool(data)
+    var used = {}
+    if (Object.prototype.toString.call(exclude) === '[object Array]') {
+      for (var e = 0; e < exclude.length; e++) used[String(exclude[e])] = true
+    }
+    var rest = []
+    for (var q = 0; q < pool.length; q++) {
+      if (!used[pool[q].id]) rest.push(pool[q])
+    }
+    if (only) {
+      var hit = null
+      for (var w = 0; w < rest.length; w++) {
+        if (rest[w].id === String(only)) hit = rest[w]
+      }
+      if (!hit) return null
+      rest = [hit]
+    }
+    if (!rest.length) return null
+    var r = typeof rng === 'function' ? rng : Math.random
+    var v = Number(r())
+    if (!isFinite(v) || v < 0) v = 0
+    if (v >= 1) v = 0.999999
+    var card = rest[Math.floor(v * rest.length)]
+    var finish = cardKindFinish(data && data.player, card.id)
+    return { cardId: card.id, rarity: card.rarity, finish: finish, points: checkinReward(data, card, finish) }
+  }
+
+  /**
+   * 今日签到的完整状态（纯函数）：能不能开、还能重抽几次、候选、能不能领、下次刷新。
+   *
+   * `rolls` 只在 `date === 今天` 时算数 —— 昨天的候选不能留到今天来领
+   * （否则攒着不领，第二天一次领两张）。
+   *
+   * ⚠️ **「今天领过没有」只看 `checkin.done`，不看 `player.lastGift`。**
+   *
+   * 这是 2026-09-19 改成签到时的**迁移**决定，理由很具体：`lastGift` 是旧机制
+   *（打开页面自动送 300 点）留下的标记，而旧版**已经上线过**。任何人今天打开过
+   * 旧版静态站，他的浏览器里就有一个今天的 `lastGift`；动态站那边同理
+   *（旧代码调 `api/player/gift` 写过盘）。如果新签到继续认这个标记，
+   * **所有今天来过的人都会被判成「已经领过了」** —— 而且明天才会好，
+   * 看起来就像新功能坏了。
+   *
+   * 所以新签到自己带一个标记（`checkin.done`，领取时写 true），旧标记不再参与判定。
+   * 代价是「旧自动赠送 + 新签到」在同一天可能各给一次 300 点 ——
+   * 这是作者明确要的（「重置今天的签到次数，更新完成之后今天可以立刻再签到」）。
+   */
+  function checkinState(data, now) {
+    var cfg = dailyConfig(data)
+    var day = checkinDay(now, cfg.refreshHour)
+    var p = (data && data.player) || {}
+    var ck = p.checkin && String(p.checkin.date || '') === day ? p.checkin : null
+    var rolls = ck && Object.prototype.toString.call(ck.rolls) === '[object Array]' ? ck.rolls : []
+    var claimed = ck ? String(ck.claimed || '') : ''
+    var pool = checkinPool(data)
+    // 能开几张 = min(1 + 重抽次数, 池子里有几张)（候选不重复，池子小就只能开满池子）
+    var totalRolls = Math.min(1 + cfg.rerolls, pool.length)
+    var done = !!(ck && ck.done)
+    return {
+      enabled: cfg.enabled,
+      day: day,
+      base: cfg.points,
+      rolls: rolls,
+      claimed: claimed,
+      /** 今天领过了（领了就既不能重抽、也不能再领） */
+      done: done,
+      /**
+       * 今天有没有「旧的每日赠送」留下来的标记 —— 只用于**说明**，不参与判定。
+       * 页面据此可以提一句「（旧版今天已经送过 300 点，签到照样能领）」。
+       */
+      legacyGiftToday: !done && giftClaimedOn(data, day),
+      totalRolls: totalRolls,
+      rollsLeft: Math.max(0, totalRolls - rolls.length),
+      poolSize: pool.length,
+      canRoll: cfg.enabled && !done && rolls.length < totalRolls && pool.length > 0,
+      // 池子为空时也可以「领」——那是一次只有基础点数的签到
+      canClaim: cfg.enabled && !done && (rolls.length > 0 || pool.length === 0),
+      nextRefreshAt: nextCheckinRefresh(now, cfg.refreshHour),
+    }
+  }
+
+  /**
+   * 领取某一张候选之后的玩家状态（纯函数）：
+   * `{ ok, points, base, bonus, date, cardId, checkin, reason }`。
+   *
+   * 四道校验，任何一道不过都**不发点数**：
+   *   ① 今天还没领过（`checkin.done`，见 `checkinState`）
+   *   ② 这张卡真的在今天的候选里（不能凭空指定一张红碎 SP 来领 75 点）
+   *   ③ 功能开着
+   *   ④ 空 `cardId` 只接受「池子里一张 UR/SP 都没有」的那种签到
+   * 点数 = 基础（`daily.points`）+ 这张候选的额外点数。
+   *
+   * 返回的 `checkin` 一定带 `done: true` —— 那是「今天领过没有」的**唯一**判据，
+   * 漏了它的症状是「点一次领 300 点，点十次领 3000 点」。
+   *
+   * @param {string} cardId 空串 = 候选池为空，只领基础点数
+   */
+  function checkinClaimAfter(data, cardId, now) {
+    var cfg = dailyConfig(data)
+    var p = (data && data.player) || {}
+    var state = checkinState(data, now)
+    if (!cfg.enabled) return { ok: false, reason: '签到已关闭' }
+    if (state.done) return { ok: false, reason: '今天已经领过了' }
+    var want = String(cardId || '')
+    if (!want) {
+      // 没有卡可抽的签到：只发基础点数。
+      // ⚠️ 不能顺手也放行「还没开卡就先领」——那等于「不开也能领」，
+      // 而「开出来的卡按种类给额外点数」这半个需求就白设计了。
+      if (state.poolSize > 0) return { ok: false, reason: '先点签到开卡，再从候选里挑一张' }
+      return {
+        ok: true,
+        points: Math.max(0, state.base),
+        base: Math.max(0, state.base),
+        bonus: 0,
+        date: state.day,
+        cardId: '',
+        checkin: { date: state.day, rolls: state.rolls, claimed: '', done: true },
+        player: p,
+      }
+    }
+    var hit = null
+    for (var i = 0; i < state.rolls.length; i++) {
+      if (state.rolls[i] && state.rolls[i].cardId === want) hit = state.rolls[i]
+    }
+    if (!hit) return { ok: false, reason: '这张卡不在今天的候选里' }
+    var bonus = Math.max(0, Math.floor(Number(hit.points || 0)))
+    return {
+      ok: true,
+      points: Math.max(0, state.base) + bonus,
+      base: Math.max(0, state.base),
+      bonus: bonus,
+      date: state.day,
+      cardId: want,
+      checkin: { date: state.day, rolls: state.rolls, claimed: want, done: true },
+      player: p,
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // HR：用 HR 碎片兑换动态卡面（用户 2026-09-19）
+  // ---------------------------------------------------------------------------
+
+  /** HR 兑换配置（与 lib/data.js 的 defaultHr 保持一致） */
+  function hrConfig(data) {
+    var cfg = (data && data.settings && data.settings.hr) || {}
+    return {
+      enabled: cfg.enabled !== false,
+      shards: Math.max(1, Math.floor(Number(cfg.shards === undefined ? 20 : cfg.shards))),
+    }
+  }
+
+  /** 这张卡解锁了动态卡面没有 */
+  function hasHr(player, cardId) {
+    return !!((player && player.hr) || {})[cardId]
+  }
+
+  /**
+   * 能不能兑换这张卡的动态卡面。**四种「不能」要分开说**，都糊成一句
+   * 「不能兑换」的话，作者会以为是碎片不够。
+   */
+  function canUnlockHr(data, cardId) {
+    var cfg = hrConfig(data)
+    var card = cardOf(data, cardId)
+    var p = (data && data.player) || {}
+    var have = Math.max(0, Math.floor(Number(((p.shards) || {})[HR_SHARD_RARITY] || 0)))
+    var cost = cfg.shards
+    if (!cfg.enabled) return { ok: false, reason: 'HR 动态卡面的兑换已关闭', cost: cost, have: have }
+    if (!card) return { ok: false, reason: '名册里没有这张卡', cost: cost, have: have }
+    if (!card.dynamic) return { ok: false, reason: '这张卡没有配动态卡面', cost: cost, have: have }
+    if (hasHr(p, cardId)) return { ok: false, reason: '这已经解锁过了', cost: cost, have: have, owned: true }
+    if (have < cost) return { ok: false, reason: 'HR 碎片不够（还差 ' + (cost - have) + ' 个）', cost: cost, have: have }
+    return { ok: true, cost: cost, have: have, card: card }
+  }
+
+  /**
+   * 兑换之后的新状态（纯函数）：`{ ok, hr, shards, reason }`。
+   *
+   * **原子性**：先扣碎片再解锁，扣不出来就整笔不做 —— 半个状态
+   *（碎片扣了、卡面没解锁）比不做更糟，而它在界面上看不出来。
+   */
+  function hrUnlockAfter(data, cardId) {
+    var check = canUnlockHr(data, cardId)
+    if (!check.ok) return { ok: false, reason: check.reason }
+    var p = (data && data.player) || {}
+    var shards = Object.assign({}, (p.shards) || {})
+    var left = Math.max(0, Math.floor(Number(shards[HR_SHARD_RARITY] || 0)) - check.cost)
+    if (left > 0) shards[HR_SHARD_RARITY] = left
+    else delete shards[HR_SHARD_RARITY]
+    var hr = Object.assign({}, (p.hr) || {})
+    hr[cardId] = true
+    return { ok: true, hr: hr, shards: shards, cost: check.cost, cardId: cardId }
   }
 
   /** 卡池概况：每档多少张、总共有多少张可抽。给「卡池一览」用。 */
@@ -1458,6 +1830,24 @@
     priceFor: priceFor,
     dailyGift: dailyGift,
     localDateStr: localDateStr,
+    // 每日签到（点数 + 抽一张已有 UR/SP 卡按 A×B 给额外点数）
+    giftClaimedOn: giftClaimedOn,
+    dailyConfig: dailyConfig,
+    checkinDay: checkinDay,
+    nextCheckinRefresh: nextCheckinRefresh,
+    checkinPool: checkinPool,
+    checkinReward: checkinReward,
+    checkinRoll: checkinRoll,
+    checkinState: checkinState,
+    checkinClaimAfter: checkinClaimAfter,
+    cardKindFinish: cardKindFinish,
+    // HR：用 HR 碎片兑换动态卡面
+    HR_SHARD_RARITY: HR_SHARD_RARITY,
+    hrConfig: hrConfig,
+    hasHr: hasHr,
+    canUnlockHr: canUnlockHr,
+    hrUnlockAfter: hrUnlockAfter,
+    cardOf: cardOf,
     poolSummary: poolSummary,
     rateTable: rateTable,
     mulberry32: mulberry32,

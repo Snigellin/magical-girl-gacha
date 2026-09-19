@@ -79,6 +79,22 @@
   box-sizing: border-box;
 }
 
+/* --------------------------------------------------------------------------
+   hidden 属性必须真的能藏住东西
+   --------------------------------------------------------------------------
+   为什么需要一条 `!important` 的规则：`hidden` 属性靠的是 UA 样式表里的
+   `[hidden] { display: none }`，而**作者样式表里任何一条 display 都能盖掉它**
+   —— 不看优先级，UA 样式表整个来源就更弱。本页的大图正好踩中：
+   `.card-dialog-img` 与 `.card-dialog-video` 都写了 `display: block`，
+   于是 `el.hidden = true` 一点作用都没有，静态图与动态卡面就同时显出来了
+   （用户 2026-09-19 截图里那一摞）。
+   把 hidden 提成不可覆盖的规则，以后每加一个带 display 的类都不用重新踩一次。
+   -------------------------------------------------------------------------- */
+
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -834,6 +850,47 @@ body {
 }
 
 /* --------------------------------------------------------------------------
+   动态卡面（HR）
+   --------------------------------------------------------------------------
+   视频只在大图里播（网格里挂两百多个 <video> 必然卡死），网格与结果区只标一个
+   「动」字。自动播放的三个前提（muted / loop / playsinline）写在 page.html 上。
+   与静态卡面是**切换**关系（谁显示由 page.js 的 showVideo 一条判据决定），
+   所以两者的盒子尺寸必须一致，这里用与 .card-dialog-img 相同的两个上限。 */
+
+.card-dialog-video {
+  /* 尺寸必须和 .card-dialog-img **一模一样**：两者是切换关系，切换时盒子不该跳。
+     ⚠️ 不要写成 width/height: 100% —— 静态图藏起来之后，检视容器
+     （`.card-dialog-card`，inline-block）就只剩视频这一个在流内的孩子，
+     而 `height: 100%` 在由内容撑高的父元素上是循环引用，结果高度塌成 0。
+     这里跟静态图一样用「固有比例 + 两个上限」，视频自己的分辨率就是比例来源
+     （没就绪时浏览器拿 poster 的比例，也就是静态卡面的比例）。 */
+  display: block;
+  width: auto;
+  max-width: min(80vw, 21rem);
+  max-height: 56vh;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  object-fit: contain;
+  background: #000;
+}
+
+/* 网格/结果区里的「这张有动态卡面」角标 */
+.badge-hr {
+  position: absolute;
+  top: 8px;
+  left: -2px;
+  z-index: 7;
+  padding: 0.05rem 0.34rem;
+  border-radius: 999px;
+  background: rgba(123, 92, 255, 0.92);
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+/* --------------------------------------------------------------------------
    红碎补偿（抽到已有的红碎 -> 返券 + 下次十连必出同档未拥有的红碎）
    -------------------------------------------------------------------------- */
 
@@ -1537,6 +1594,168 @@ body:has(dialog[open]) .bar {
 }
 
 .coll-expand {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+}
+
+/* 动态 / 静态卡面开关（图鉴工具栏） */
+.coll-dynamic {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+}
+
+.coll-dynamic.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 一张都没解锁时按钮是禁用状态 —— 要能一眼看出「现在不能用」，而不是点了没反应 */
+.coll-dynamic[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.coll-dynamic-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin: -0.5rem 0 0.8rem;
+}
+
+/* --------------------------------------------------------------------------
+   HR（动态卡面）：碎片区块 + 大图里的 HR 标识
+   -------------------------------------------------------------------------- */
+
+.hr-panel .panel-hint + .panel-hint {
+  margin-top: -0.4rem;
+}
+
+.hr-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.hr-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+/* 已解锁的那几行压低对比度：它们已经不需要读者做任何事 */
+.hr-row-done {
+  opacity: 0.62;
+}
+
+.hr-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.88rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hr-row-state {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* 大图标题旁的 HR 标识：这是「这张卡有动态形态」的唯一凭据（格子上只有一个「动」字） */
+.hr-chip {
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* --------------------------------------------------------------------------
+   每日签到
+   --------------------------------------------------------------------------
+   四张候选卡平铺（1 张初始 + 最多 3 次重抽），每张下面写明「种类 + 点数」，
+   再各自带一个「领这一张」。选中的那张会高亮 —— 领完还要能一眼看出领的是哪张。
+   -------------------------------------------------------------------------- */
+
+.checkin-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin: 0.2rem 0 1rem;
+}
+
+.checkin-roll {
+  font-weight: 700;
+}
+
+.checkin-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.checkin-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: 0.7rem;
+  margin-bottom: 1rem;
+}
+
+.checkin-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+/* 选中/已领的那张：边框换成强调色，并把其余候选压暗（选择已经做完了） */
+.checkin-card-picked {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.checkin-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.82rem;
+}
+
+.checkin-card-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.checkin-card-kind {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.checkin-card-points {
+  color: var(--gold);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.checkin-picked {
+  text-align: center;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.checkin-take {
   font-size: 0.8rem;
   padding: 0.25rem 0.6rem;
 }

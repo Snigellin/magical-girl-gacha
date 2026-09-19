@@ -66,6 +66,13 @@
    */
   var DREAM_REWARD_DEFAULTS = { points: 1, foilBonus: { flat: 1, full: 2, shatter: 5 } }
 
+  /**
+   * 重复面闪/全闪的额外返还（与 lib/data.js 的 defaultDupReward 一致）。
+   * 用户 2026-09-19：「重复的面闪额外返回一点点数（作者定：1 点），
+   * 重复的全闪额外返还一个 HR 碎片」。
+   */
+  var DUP_REWARD_DEFAULTS = { flatPoints: 1, fullHrShards: 1 }
+
   /** 「清空缓存」重置后的起始资源（与 lib/data.js 的 defaultResetGift 一致） */
   var RESET_DEFAULTS = { points: 300, tickets: 20 }
 
@@ -82,6 +89,23 @@
     var g = root && root.Gacha
     if (g && Array.isArray(g.FOIL_IDS) && g.FOIL_IDS.length) return g.FOIL_IDS
     return FOIL_ID_FALLBACK
+  }
+
+  /**
+   * HR 碎片在 `player.shards` 里的键。
+   *
+   * 与 `foilIds()` 同一条纪律：优先用 draw.js 那一份（浏览器里它是唯一真源），
+   * 拿不到时用这里的兜底 —— 本文件要能在 Node 里单独加载。
+   * 三份拷贝（lib/data.js / page/draw.js / page/shards.js）由
+   * `test-plugin.mjs` §5f 钉在一起：键错开的症状是「服务端记了、页面读不到」，
+   * 看起来像「返还丢了」。
+   */
+  var HR_SHARD_FALLBACK = 'HR'
+
+  function hrShardKey() {
+    var g = root && root.Gacha
+    if (g && typeof g.HR_SHARD_RARITY === 'string' && g.HR_SHARD_RARITY) return g.HR_SHARD_RARITY
+    return HR_SHARD_FALLBACK
   }
 
   /**
@@ -496,6 +520,7 @@
     var r = rules(data)
     var reward = opts.reward === 'points' ? 'points' : 'shards'
     var dreamReward = dreamRewardRules(data)
+    var dup = dupRewardRules(data)
     var owned = Object.assign({}, (data && data.player && data.player.owned) || {})
     var shards = Object.assign({}, (data && data.player && data.player.shards) || {})
     var duplicates = 0
@@ -516,12 +541,14 @@
 
       var gained = 0
       var points = 0
+      var hrShards = 0
       if (isDuplicate) {
         duplicates++
         duplicateCards.push(card)
+        // 这一张抽出来的工艺（没有 = 平卡）。两个池子都要看它。
+        var fin = item && item.finish ? String(item.finish) : ''
         if (reward === 'points') {
           // 追梦池：碎片一个都不给，改成点数（基础 + 这一张的工艺加成）
-          var fin = item && item.finish ? String(item.finish) : ''
           points = dreamReward.points + Number(dreamReward.foilBonus[fin] || 0)
           gainedPoints += points
         } else {
@@ -531,10 +558,27 @@
             gainedShards[rarity] = Number(gainedShards[rarity] || 0) + gained
           }
         }
+        /**
+         * 闪卡重复的**额外**返还（用户 2026-09-19，两个池子都给）：
+         *   平闪 -> 再给 `flatPoints` 点（作者定 1 点，「一点点数」）
+         *   全闪 -> 再给 `fullHrShards` 个 **HR 碎片**（换动态卡面用的那种）
+         * 红碎不在这条要求里：红碎重复已经由红碎补偿管（返券 + 攒欠条），
+         * 再叠一笔会出现「两个机制都以为自己在管红碎」。
+         */
+        if (dup.enabled && fin === 'flat' && dup.flatPoints > 0) {
+          points += dup.flatPoints
+          gainedPoints += dup.flatPoints
+        }
+        if (dup.enabled && fin === 'full' && dup.fullHrShards > 0) {
+          hrShards = dup.fullHrShards
+          var hk = hrShardKey()
+          shards[hk] = Number(shards[hk] || 0) + hrShards
+          gainedShards[hk] = Number(gainedShards[hk] || 0) + hrShards
+        }
       } else {
         newCards.push(card)
       }
-      perCard.push({ card: card, rarity: rarity, duplicate: isDuplicate, shards: gained, points: points })
+      perCard.push({ card: card, rarity: rarity, duplicate: isDuplicate, shards: gained, points: points, hrShards: hrShards })
     }
 
     /**
@@ -605,6 +649,33 @@
     return {
       points: Number.isFinite(base) && base >= 0 ? Math.floor(base) : DREAM_REWARD_DEFAULTS.points,
       foilBonus: bonus,
+    }
+  }
+
+  /**
+   * 重复的**面闪/全闪**再额外返还什么（用户 2026-09-19）：
+   * 「抽取到重复的面闪卡牌时，额外返回一点点数，不论是普通池还是逐梦池；
+   *   抽取到重复的全闪卡牌时，额外返还一个 HR 碎片」。
+   *
+   * ⚠️ 与 `dreamRewardRules` 是**两笔**，不是一件事：
+   *   · dreamReward 管「追梦池的重复卡改返点数」（普通池根本不走它）
+   *   · 这一份管「重复的**闪卡**额外再给什么」，**两个池子都给**
+   * 合成一处就会出现「普通池的重复面闪不给点数」或者「追梦池的重复全闪不给碎片」——
+   * 两种都只在半边池子里错，页面上很难看出来。
+   *
+   * @returns {{enabled:boolean, flatPoints:number, fullHrShards:number}}
+   */
+  function dupRewardRules(dataOrSettings) {
+    var s = dataOrSettings && dataOrSettings.settings ? dataOrSettings.settings : dataOrSettings || {}
+    var raw = s && s.dupReward && typeof s.dupReward === 'object' ? s.dupReward : {}
+    var pick = function (v, fallback) {
+      var n = Number(v)
+      return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
+    }
+    return {
+      enabled: raw.enabled !== false,
+      flatPoints: pick(raw.flatPoints, DUP_REWARD_DEFAULTS.flatPoints),
+      fullHrShards: pick(raw.fullHrShards, DUP_REWARD_DEFAULTS.fullHrShards),
     }
   }
 
@@ -699,6 +770,8 @@
     rules: rules,
     upgradeCostFor: upgradeCostFor,
     dreamRewardRules: dreamRewardRules,
+    dupRewardRules: dupRewardRules,
+    hrShardKey: hrShardKey,
     resetGift: resetGift,
     resetPlayer: resetPlayer,
     memorialCards: memorialCards,

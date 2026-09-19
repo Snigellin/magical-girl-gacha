@@ -66,6 +66,29 @@
   -webkit-touch-callout: none;
 }
 
+/*
+ * 图鉴「动态卡面」模式下格子里的 `<video>`。
+ *
+ * 几何与 `.card-img` **完全一致**（同一个 inset + object-fit: contain）：
+ * 两份不一致的话，开关一拨卡面会跳一下 —— 而它们本来就是同一张卡面的两种形态。
+ * `background` 给黑色：视频还没就绪时 poster 先顶着，poster 也没有时至少是块
+ * 深色底而不是透出占位层的字。
+ * ⚠️ 这里是作者样式里的 `display: block`，所以 `hidden` 属性**压不住它** ——
+ * page.css 里那条全局 `[hidden] { display: none !important }` 就是为这种事存在的。
+ */
+.card-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  z-index: 2;
+  background: #000;
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
+}
+
 /* 占位层：图片盖在它上面。慢网/缺图时它是内容，不是空白 */
 .card-placeholder {
   position: absolute;
@@ -734,13 +757,44 @@
       var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6),
       var(--foil-1), var(--foil-2), var(--foil-3), var(--foil-4), var(--foil-5), var(--foil-6)
     ),
-    repeating-linear-gradient(100deg, rgba(40, 40, 40, 1) 0 2px, rgba(190, 190, 190, 1) 2px 4px);
+    /*
+     * 细金属条：暗 4px + 亮 4px = 8px 一个周期，亮条 160。
+     *
+     * 用户 2026-09-19 的第一条要求：「细金属条减少一半，现在的有些过于密集，
+     * 略微减少曝光程度」—— 周期从 2px + 2px（4px）改成 4px + 4px（8px）：
+     * 原来一张 2:3 的卡上约 84 条，密到看不出「金属条」，只看到一片摩尔纹。
+     *
+     * 用户 2026-09-19 的第二条要求：「减少金属条光照后的亮度」—— 亮条 190 -> 160，
+     * 紧接着第三条：「金属条亮度改到 100」—— 亮条 160 -> 100（一条比一条更含蓄，
+     * 作者是在看着真实卡面调，所以按他给的数走，不要「顺手」取整到别的值）。
+     *
+     * 这一步**只压金属条自己的反光**，不动整层曝光，所以是「条更含蓄」而不是
+     * 「整张卡更暗」。`overlay` 混合下亮条（>128）提亮底下的彩虹、暗条（<128）压暗它 ——
+     * 现在亮条 100 已经**低于 128**，于是这一层不再提亮，而是整体往下压一点：
+     * 金属条从「反光」变成了「暗纹」，这是 100 这个数带来的性质变化，不是 bug。
+     *
+     * 三个旋钮各管一段，别拿一个去替代另一个：
+     *   · 这里的 4px / 8px   -> 条有多密（周期）
+     *   · 亮条 100 / 暗条 40 -> 反光有多亮、条有多分明
+     *   · brightness(0.98)   -> 整层光膜的曝光（连闪点与指针亮度一起）
+     * `cover` 下这里的 px 就是屏幕像素，不会被卡面尺寸缩放。
+     */
+    repeating-linear-gradient(100deg, rgba(40, 40, 40, 1) 0 4px, rgba(100, 100, 100, 1) 4px 8px);
   background-position:
     calc(((50% - var(--background-x)) * 2.6) + 50%) calc(((50% - var(--background-y)) * 3.5) + 50%),
     center center;
   background-size: 400% 400%, cover;
   background-blend-mode: overlay;
-  filter: brightness(1.06) contrast(1.05) saturate(1.15);
+  /*
+   * 曝光：1.06 -> 0.98（用户第一条要求里的「略微减少曝光程度」）。
+   *
+   * `filter` 作用在 `.foil-shine` 上，**连同它的 ::before / ::after 一起被过滤** ——
+   * 所以这一个数就是「整层光膜的曝光」，闪点与指针亮度也跟着降，不会出现
+   * 「压了金属条、闪点却还是原来的亮度」这种半吊子。
+   * 反过来，只想动金属条自己的明暗时改的是上面那层亮条 —— 整层曝光与高光强度
+   * 是两个旋钮（用户 2026-09-19 两次要求分别踩的就是这两个）。
+   */
+  filter: brightness(0.98) contrast(1.05) saturate(1.15);
   mix-blend-mode: color-dodge;
 }
 

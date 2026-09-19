@@ -75,6 +75,13 @@
     // 想按卡池看牌 → 图鉴里按卡池收起/展开。
     { id: 'collection', label: '图鉴', hash: '#/collection' },
     { id: 'shards', label: '碎片兑换', hash: '#/shards' },
+    /**
+     * 每日签到（用户 2026-09-19）。
+     *
+     * 放在碎片兑换之后：它是「每天来一次」的动作，不是抽卡的前置 ——
+     * 读者点进来领完就走，所以不占第一位（第一位留给抽卡）。
+     */
+    { id: 'checkin', label: '每日签到', hash: '#/checkin' },
     { id: 'history', label: '抽卡记录', hash: '#/history' },
     // 「关注安叶喵」：参考 dsh-magical-girl-catalog 的「关注安叶！」板块。
     // 放在后台管理之前 —— 那是给读者的内容，后台是给作者的。
@@ -97,6 +104,13 @@
     pool: 'gacha.pool.v1',
     /** 哪些卡池切到了「追梦池」模式（读者偏好；花券的是读者，所以由他决定） */
     dream: 'gacha.dream.v1',
+    /**
+     * 图鉴里显示动态卡面还是静态卡面（读者偏好，默认**静态**）。
+     *
+     * 默认关是刻意的：默认开意味着读者一进图鉴就有视频在解码，
+     * 而他可能只是来查一张卡的合成价 —— 那是白花的电量和流量。
+     */
+    dynamic: 'gacha.dynamic.v1',
   }
 
   /**
@@ -592,6 +606,22 @@
     // 点数（普通抽卡次数）与「今天领过每日赠送没有」
     if (patch.points !== undefined) p.points = Number(patch.points || 0)
     if (patch.lastGift !== undefined) p.lastGift = String(patch.lastGift || '')
+    /*
+     * HR 动态卡面的解锁状态：图鉴的动静开关、大图的兑换按钮、碎片页的 HR 区块
+     * 全都读它。漏了这一行的症状很典型 —— **本机已经解锁了，界面还说没解锁**
+     * （碎片扣掉了、按钮还在那儿），刷新一次又正常（服务端那份是新的）。
+     * 这一类「快照少写一个字段」的 bug 在 points/lastGift 上已经踩过一次。
+     */
+    if (patch.hr) p.hr = patch.hr
+    // 今日签到的候选与选择：签到页要在**同一次会话里**立刻看到刚开的四张牌
+    if (patch.checkin) p.checkin = patch.checkin
+    /*
+     * 红碎欠条：抽卡时本地已经把「兑现掉 / 新攒的」算好了（见 runDraw 的 pityNext），
+     * 不写回快照的话，紧接着的下一次十连读到的还是抽之前那张旧表 ——
+     * 症状是「欠条兑现过了却还欠着」，或者反过来「攒了新的却没补」。
+     * 后端（动态站）本来会靠响应里那份 player 自愈，但**本机那一刻**是错的。
+     */
+    if (patch.shatterPity) p.shatterPity = patch.shatterPity
   }
 
   /**
@@ -620,6 +650,22 @@
         currencyName: p.currencyName || '抽卡券',
         points: Number(p.points || 0),
         lastGift: String(p.lastGift || ''),
+        /**
+         * ⚠️ 下面这三张表**必须显式带上**，不能指望 `d.player` 里已经有。
+         *
+         * 静态站（导出时会剥掉 player）里 `d.player` 是空的，全靠这份清单补；
+         * 漏字段的症状都极隐蔽：
+         *   · `shatterPity` -> 欠条「当时领了、下次十连却不兑现」，而且**只在静态站**、
+         *     且只在「今天已经签过到」的时候出现 —— 2026-09-19 之前它一直没露出来，
+         *     是因为启动时那次自动发放的每日赠送顺手把 player 塞进了快照，
+         *     把这份清单的漏洞挡住了。改成签到的当天就炸在 §42 的断言上。
+         *   · `checkin` -> 签到页看不到自己刚开的四张牌，领取永远报「不在候选里」
+         *   · `hr` -> 刚解锁的动态卡面在界面里立刻又变回「未解锁」
+         * **「另有别处会帮我补上」不是设计，是巧合。**
+         */
+        shatterPity: p.shatterPity || {},
+        hr: p.hr || {},
+        checkin: p.checkin || {},
       }),
     })
   }
@@ -746,34 +792,16 @@
   }
 
   /**
-   * 每日赠送：每天第一次打开页面送 300 点（用户要求）。
+   * ⚠️ 每日赠送**不再自动发放**（用户 2026-09-19）。
    *
-   * 判定用**本地日期**（`YYYY-MM-DD`），存在 `player.lastGift`；
-   * 规则本身在 draw.js 的 `dailyGift`（纯函数，服务端也用同一份）。
+   * 这里以前是 `claimDailyGift()`：打开页面就送 300 点，并把 `player.lastGift`
+   * 写成今天。改成签到之后**不能再留一个自动发放的入口** —— 留着的话点数会
+   * 自动到账两次（一次自动、一次签到），而页面上只会显示「点数比预期多」。
+   *
+   * 现在发点数的地方只有一处：`viewCheckin` 的领取按钮 → `doCheckinClaim`。
+   * 旧的「当天领过没有」判定仍然共用 `player.lastGift`（见 draw.js 的
+   * `giftClaimedOn`），所以换个入口也不会多领一次。
    */
-  function claimDailyGift() {
-    var g = G()
-    if (!g || !g.dailyGift || READONLY === undefined) return null
-    var today = g.localDateStr ? g.localDateStr() : ''
-    var check = g.dailyGift(dataWithState(), today)
-    if (!check.ok) return null
-    var local = localState()
-    local.points = Math.max(0, Number(local.points || 0)) + check.points
-    local.lastGift = today
-    saveLocal(local)
-    applyStateToSnapshot({ points: local.points, lastGift: local.lastGift })
-    // 动态站：把「今天领过了」也落到服务端，否则刷新一次又能领
-    if (BACKEND && state.unlocked) {
-      request('/player/gift', { method: 'POST', body: { date: today, points: check.points } })
-        .then(function (res) {
-          if (res && res.player && state.data) state.data.player = res.player
-        })
-        .catch(function (err) {
-          console.warn('[gacha] 每日赠送同步失败（点数已记在本机）：', err && err.message)
-        })
-    }
-    return check
-  }
 
   /**
    * 某个卡池里的全部卡牌对象。
@@ -1709,6 +1737,128 @@
   }
 
   /**
+   * 图鉴「动态卡面」模式下，格子里那些 `<video>` 的可见性管理。
+   *
+   * 用户 2026-09-19：「图鉴页面可以切换动态卡牌与静态卡牌（只对有动态版本的
+   * 卡牌生效）」。字面做法就是把格子换成视频 —— 但图鉴一页有两百多张卡，
+   * 全页同时解码几十路视频是**必然的卡死**（这是本项目写死的性能红线）。
+   * 所以规矩是：
+   *   · 只有**已解锁 HR**、且配了动态卡面的卡才建 `<video>`（没解锁的连节点都没有）
+   *   · 建出来的视频**默认不播**（poster 顶着静态卡面），进视口才播、出视口就停
+   *   · 同时在播的**最多 `GRID_VIDEO_MAX` 路**，超了就顶掉最早进来的那一路
+   *     （页面被缩得很小、一屏几十格时，这条才真正生效）
+   *   · 没有 `IntersectionObserver`（老浏览器 / 测试替身）时**一个都不播** ——
+   *     判断不了可见性就不赌，格子上仍是静态卡面 + 角标
+   */
+  var GRID_VIDEO_MAX = 12
+  var gridVideos = { io: null, playing: [], warned: false }
+
+  function gridVideoObserver() {
+    if (gridVideos.io) return gridVideos.io
+    var IO = window.IntersectionObserver
+    if (typeof IO !== 'function') {
+      if (!gridVideos.warned) {
+        gridVideos.warned = true
+        console.warn('[gacha] 这个浏览器没有 IntersectionObserver：图鉴的动态卡面只显示静态帧（大图里照常播）')
+      }
+      return null
+    }
+    gridVideos.io = new IO(function (entries) {
+      for (var i = 0; i < entries.length; i++) {
+        var e = entries[i]
+        if (!e || !e.target) continue
+        if (e.isIntersecting) startGridVideo(e.target)
+        else stopGridVideo(e.target)
+      }
+    }, { rootMargin: '160px' })
+    return gridVideos.io
+  }
+
+  /** 停一路：暂停 + 从「正在播」名单里摘掉（重复调用是安全的） */
+  function stopGridVideo(v) {
+    if (!v) return
+    var i = gridVideos.playing.indexOf(v)
+    if (i >= 0) gridVideos.playing.splice(i, 1)
+    try {
+      v.pause()
+    } catch (e) {}
+  }
+
+  /** 播一路：超过上限时先顶掉最早进来的那一路（FIFO） */
+  function startGridVideo(v) {
+    if (!v || gridVideos.playing.indexOf(v) >= 0) return
+    while (gridVideos.playing.length >= GRID_VIDEO_MAX) stopGridVideo(gridVideos.playing[0])
+    gridVideos.playing.push(v)
+    v.muted = true
+    v.loop = true
+    v.playsInline = true
+    var p = v.play && v.play()
+    // 自动播放被浏览器拦下是常态（策略差异）：停了就是一张海报，不报错刷屏
+    if (p && typeof p.catch === 'function') p.catch(function () {})
+  }
+
+  /**
+   * 把格子里的视频登记进来。
+   *
+   * ⚠️ 每次整页 render 都会重建这些节点，所以必须先 `resetGridVideos()` ——
+   * 不重置的话观察器还盯着**已经被扔掉**的节点，既漏内存又让「同时在播」的
+   * 计数永远只增不减（最后变成谁都不播）。
+   */
+  function registerGridVideo(v) {
+    var io = gridVideoObserver()
+    stopGridVideo(v)
+    if (io && io.observe) io.observe(v)
+    return v
+  }
+
+  function resetGridVideos() {
+    for (var i = gridVideos.playing.length - 1; i >= 0; i--) stopGridVideo(gridVideos.playing[i])
+    gridVideos.playing = []
+    if (gridVideos.io && gridVideos.io.disconnect) {
+      try {
+        gridVideos.io.disconnect()
+      } catch (e) {}
+      gridVideos.io = null
+    }
+  }
+
+  /** 这张卡的动态卡面解锁了没有（HR 是状态位，见 draw.js 的 hrUnlockAfter） */
+  function hrUnlocked(cardId) {
+    var g = G()
+    if (g && typeof g.hasHr === 'function') return g.hasHr(player(), cardId)
+    // 拿不到规则模块时读原始字段（**不能**当成「都解锁了」）
+    var hr = (player() || {}).hr || {}
+    return !!hr[cardId]
+  }
+
+  /** 现在有哪几张卡配了动态卡面（图鉴顶部据此解释那个开关） */
+  function hrCards() {
+    return (state.data.cards || []).filter(function (c) {
+      return !c.hidden && c.dynamicUrl
+    })
+  }
+
+  /** 图鉴是不是「动态卡面」模式（读者偏好，存在本机） */
+  function dynamicMode() {
+    return !!lsGet(LS.dynamic, false)
+  }
+
+  /**
+   * HR 碎片的键与总数。
+   *
+   * 键优先问 `page/draw.js`（浏览器里它是唯一真源），拿不到时用兜底 ——
+   * 与 shards.js 的 `hrShardKey()` 同一条纪律，三份拷贝由 test-plugin.mjs §5f 钉住。
+   */
+  var HR_SHARD_KEY = (function () {
+    var g = G()
+    return g && typeof g.HR_SHARD_RARITY === 'string' && g.HR_SHARD_RARITY ? g.HR_SHARD_RARITY : 'HR'
+  })()
+
+  function hrShardTotal() {
+    return Math.max(0, Number((shards() || {})[HR_SHARD_KEY] || 0))
+  }
+
+  /**
    * 卡面。2:3 竖版，图片 object-fit: contain（美术图不能裁）。
    *
    * 四条硬要求：
@@ -1716,6 +1866,9 @@
    *   2. 失败要有原因：把「哪个文件读不到」写在卡上
    *   3. 占位里显示角色名与稀有度，所以没有美术资源时页面依然是可用的
    *   4. 隐藏条目对读者不可见，对已解锁的人带角标
+   *
+   * `opts.dynamic`（图鉴开了动态模式 + 这张卡解锁了 HR）时用 `<video>` 替掉静态图：
+   * poster 仍是静态卡面，所以「还没就绪 / 不播」时看到的就是原来那张图。
    */
   function cardFigure(card, opts) {
     opts = opts || {}
@@ -1744,7 +1897,36 @@
       ])
     )
 
-    if (card.imageUrl) {
+    if (opts.dynamic && card.dynamicUrl) {
+      /**
+       * 图鉴「动态卡面」模式：这一格用 `<video>`（poster 仍是静态卡面）。
+       *
+       * 自动播放的三个前提必须**在属性（property）上也设一遍** —— 与 page.html 里
+       * 大图那个 `<video>` 不同，这个是动态创建的，HTML 上没地方声明它们；
+       * 少一个的症状是「视频静静地停在第一帧」，页面上不会有任何报错。
+       * `preload="metadata"`：先只取头信息，滚到哪儿才播哪儿。
+       */
+      var v = el('video', {
+        class: 'card-video',
+        src: card.dynamicUrl,
+        poster: card.imageUrl || '',
+        preload: 'metadata',
+        draggable: 'false',
+        'aria-label': (card.name || '卡面') + ' 动态卡面',
+      })
+      v.muted = true
+      v.loop = true
+      v.playsInline = true
+      v.setAttribute('muted', '')
+      v.setAttribute('loop', '')
+      v.setAttribute('playsinline', '')
+      // 读不到视频时**退回静态图**（与 card-img 那条路一样：绝不静默留一块空白）
+      v.addEventListener('error', function () {
+        v.hidden = true
+        if (opts.onVideoError) opts.onVideoError(card)
+      })
+      face.appendChild(registerGridVideo(v))
+    } else if (card.imageUrl) {
       // ⚠️ draggable="false"：浏览器默认把 <img> 当成可拖拽对象，一按住拖动就会
       // 开始**原生图片拖拽**（半透明残影 + 禁止光标），我们的 pointermove 也就断了。
       // 大图里的「按住拖动 = 换角度看闪卡」正是被这件事抢走的。
@@ -1788,6 +1970,24 @@
       // 让图鉴、抽卡结果、抽卡动画里的闪卡自己把质感显出来。
       // 大图（.card-dialog-card）不走这条路：那里是拖动检视，光由手指给。
       face.appendChild(el('span', { class: 'foil-sweep', 'aria-hidden': 'true' }))
+    }
+
+    /**
+     * 动态卡面（HR）的角标。
+     *
+     * 网格与结果区**不播视频**（两百多张卡各挂一个 `<video>` = 浏览器同时解码
+     * 几十路视频，必然卡死），所以这里只标一个「动」字：读者知道这张卡点开大图
+     * 会动，大图里才真的用 `<video>`（见 paintDialogMedia）。
+     */
+    if (card.dynamicUrl) {
+      face.appendChild(
+        el('span', {
+          class: 'badge-hr',
+          text: '动',
+          title: '这张有动态卡面（HR）—— 点开大图会动起来',
+          'aria-label': '动态卡面',
+        })
+      )
     }
     box.appendChild(face)
 
@@ -2068,17 +2268,34 @@
 
     // 提示要把「拿到多少碎片」说出来，别让人自己去数
     var shardTotal = 0
+    var hrShardTotal = 0
     for (var k in settle.gainedShards) {
-      if (Object.prototype.hasOwnProperty.call(settle.gainedShards, k)) shardTotal += settle.gainedShards[k]
+      if (!Object.prototype.hasOwnProperty.call(settle.gainedShards, k)) continue
+      // HR 碎片单独数：它不是档位碎片，混进「返还 N 个碎片」会让读者以为
+      // 那一档的碎片多了（用户 2026-09-19：重复全闪额外返 HR 碎片）
+      if (k === HR_SHARD_KEY) hrShardTotal += settle.gainedShards[k]
+      else shardTotal += settle.gainedShards[k]
     }
+    /**
+     * 追梦池重复卡返的是点数（普通池返碎片）—— 但**两个池子都可能额外拿点数**
+     *（重复面闪再给一点点数，见 settleDraw）。所以这里按「实际拿到了什么」拼，
+     * 不再按池子二选一：普通池那 1 点也该被说出来，否则读者只会觉得
+     * 「说好的点数呢」。
+     */
+    var rewardParts = []
+    if (shardTotal > 0) rewardParts.push(shardTotal + ' 个碎片')
+    if (settle.gainedPoints > 0) rewardParts.push(settle.gainedPoints + ' 点')
+    if (!rewardParts.length) rewardParts.push(on ? '0 点' : '0 个碎片')
     var toastText =
       settle.duplicates > 0
         ? (count > 1 ? '十连完成' : '抽到 ' + result.results[0].card.name) +
-          ' · ' + settle.duplicates + ' 张重复，返还 ' +
-          (on ? settle.gainedPoints + ' 点' : shardTotal + ' 个碎片')
+          ' · ' + settle.duplicates + ' 张重复，返还 ' + rewardParts.join(' + ')
         : count > 1
         ? '十连完成 · 全部是新卡！'
         : '抽到新卡 ' + result.results[0].card.name
+
+    // 重复全闪额外给的 HR 碎片单独说清（它是换动态卡面的东西，藏在总数里没人看得懂）
+    if (hrShardTotal > 0) toastText += ' · 额外 +' + fmt(hrShardTotal) + ' 个 HR 碎片'
 
     // 抽到闪卡要说一句 —— 否则读者只会觉得「这张图有点不一样」而错过
     var foilHit = null
@@ -3096,6 +3313,28 @@
     })
     searchInput.value = state.collQuery || ''
     var foundNote = el('span', { class: 'coll-found' })
+    /**
+     * 动态 / 静态卡面开关（用户 2026-09-19）。
+     *
+     * 三条：① 只对有动态卡面**且已解锁 HR** 的卡生效（没解锁的格子一点都不变）；
+     * ② 一张都没有解锁时按钮**禁用并说明原因** —— 一个点了没反应的开关最容易被
+     * 当成「功能坏了」；③ 偏好存在 localStorage（读者自己的选择，不写服务端）。
+     */
+    var hrAll = hrCards()
+    var hrMine = hrAll.filter(function (c) { return hrUnlocked(c.id) })
+    var dynOn = dynamicMode()
+    var dynBtn = el('button', {
+      class: 'btn ghost coll-dynamic' + (dynOn ? ' on' : ''),
+      type: 'button',
+      'data-coll': 'dynamic',
+      'aria-pressed': dynOn ? 'true' : 'false',
+      title: hrMine.length
+        ? '在格子里播放动态卡面（共 ' + hrMine.length + ' 张已解锁）'
+        : hrAll.length
+          ? '还没有解锁任何动态卡面：用 HR 碎片兑换之后这里就有用了'
+          : '这本书里还没有配动态卡面的卡',
+    }, [dynOn ? '动态卡面：开' : '动态卡面：关'])
+    if (!hrMine.length) dynBtn.setAttribute('disabled', '')
     wrap.appendChild(
       el('div', { class: 'coll-toolbar' }, [
         el('div', { class: 'coll-search-box' }, [
@@ -3103,10 +3342,22 @@
           searchInput,
         ]),
         foundNote,
+        dynBtn,
         el('button', { class: 'btn ghost coll-expand', type: 'button', 'data-coll': 'expand' }, ['全部展开']),
         el('button', { class: 'btn ghost coll-expand', type: 'button', 'data-coll': 'collapse' }, ['全部收起']),
       ])
     )
+    if (hrAll.length) {
+      wrap.appendChild(
+        el('div', { class: 'coll-dynamic-note' }, [
+          el('span', {
+            text:
+              '动态卡面：共 ' + hrAll.length + ' 张，已解锁 ' + hrMine.length + ' 张' +
+              (hrMine.length ? '（开开关后格子里会直接播视频，滚出屏幕就停）' : '（去「碎片兑换」用 20 个 HR 碎片换一张）'),
+          }),
+        ])
+      )
+    }
 
     var listBox = el('div', { class: 'coll-list' })
     // 工艺筛选条：只有真的抽到过闪卡才出现（否则是一排点了没反应的按钮）
@@ -3139,7 +3390,9 @@
         var n = Number(owned[c.id] || 0)
         var holder = el('div', { class: 'coll-cell' + (n > 0 ? '' : ' coll-locked') })
         // 闪卡效果只在自己拥有时才显示（finishFor 只在自己拥有的工艺里挑）
-        holder.appendChild(cardFigure(c, { finish: finishFor(c.id) }))
+        // 动态卡面：开关开着 **且** 这张卡解锁了 HR 才换成视频（没解锁的照旧静态）
+        var dyn = dynamicMode() && !!c.dynamicUrl && hrUnlocked(c.id)
+        holder.appendChild(cardFigure(c, { finish: finishFor(c.id), dynamic: dyn }))
         if (n > 0) holder.appendChild(el('div', { class: 'badge-owned', text: n > 1 ? '×' + n : '已获得' }))
         // 拥有的闪卡在格子上挂一个小标签，一眼能扫出「这张我有工艺版本」
         var ownedFin = ownedFoils(c.id)
@@ -3381,11 +3634,18 @@
     // 点标题收起/展开、点卡片看大图：**都直接绑在各自的节点上**（见 paint 里的注释，
     // 委托要靠冒泡与 closest()，测试用的 shim 没有）。这里只剩两个全局按钮。
 
-    // 全部展开 / 全部收起
+    // 全部展开 / 全部收起 / 动态卡面开关
     // 两级都要收：只收二级的话，一级还开着，看起来像「收了但没收干净」。
     wrap.querySelectorAll('[data-coll]').forEach(function (b) {
       b.addEventListener('click', function () {
         var mode = b.getAttribute('data-coll')
+        if (mode === 'dynamic') {
+          // 这个开关只重画列表（不整页 render）：整页 render 会把开关自己重建，
+          // 焦点丢掉、滚动位置也回到顶部 —— 而读者刚才是滚到某处才点的。
+          lsSet(LS.dynamic, !dynamicMode())
+          paint()
+          return
+        }
         var m = {}
         if (mode === 'collapse') {
           collectionGroups(allCards).forEach(function (g) {
@@ -3407,6 +3667,68 @@
   // -------------------------------------------------------------------------
   // ⑥ 板块：碎片兑换
   // -------------------------------------------------------------------------
+
+  /**
+   * HR 碎片区块（用户 2026-09-19）。
+   *
+   * 「动态卡牌归属于 HR 的稀有度，同样不可以抽取，但是可以合成，需要消耗 HR 碎片」
+   * ＋「使用 20 张 HR 碎片，即可兑换对应卡牌的 HR 动态卡面，动态卡面与原卡面
+   *   共享特殊工艺」。
+   *
+   * 为什么单独一块、而不是混进上面那张档位表：HR **不是档位**（档位表里多一项，
+   * 概率表/卡池一览/动画配色就会各多出一档永远 0 张的幽灵档）。它是第四种碎片，
+   * 所以这里单独列出「有多少、能换什么、还差多少」。
+   * 同样明确写出：**HR 碎片不能换抽卡券**（它只有兑换动态卡面这一个用途）——
+   * 不写的话，读者会以为它漏进了换券表里。
+   */
+  function hrShardPanel() {
+    var g = G()
+    var cfg = g && typeof g.hrConfig === 'function' ? g.hrConfig(dataWithState()) : { enabled: true, shards: 20 }
+    var cards = hrCards()
+    if (!cards.length) return null
+    var have = Math.max(0, Number((shards() || {})[HR_SHARD_KEY] || 0))
+    var unlocked = cards.filter(function (c) { return hrUnlocked(c.id) }).length
+    var rows = cards.map(function (c) {
+      var done = hrUnlocked(c.id)
+      var check = g && typeof g.canUnlockHr === 'function' ? g.canUnlockHr(dataWithState(), c.id) : null
+      var btn = el('button', {
+        class: 'btn ghost hr-unlock',
+        type: 'button',
+        'data-card': c.id,
+      }, [done ? '已解锁' : check && check.ok ? '兑换（' + cfg.shards + '）' : '兑换'])
+      // 已解锁、或规则模块没加载、或碎片不够：三种都不能点，
+      // 但**原因分别写在 title 上**（糊成一句「不能兑换」等于没说）
+      if (done) btn.disabled = true
+      else if (!check) btn.disabled = true
+      else {
+        btn.disabled = !check.ok
+        if (!check.ok) btn.setAttribute('title', check.reason)
+      }
+      return el('div', { class: 'hr-row' + (done ? ' hr-row-done' : '') }, [
+        el('span', { class: 'hr-row-name', text: c.name || c.id }),
+        el('span', { class: 'hr-row-state', text: done ? '动态卡面已解锁' : check && check.ok ? '可以兑换' : (check ? check.reason : '规则模块没加载') }),
+        btn,
+      ])
+    })
+    return el('div', { class: 'panel hr-panel' }, [
+      el('div', { class: 'panel-title', text: 'HR 碎片 → 动态卡面' }),
+      el('p', {
+        class: 'panel-hint',
+        text:
+          '现有 ' + fmt(have) + ' 个 HR 碎片。' + cfg.shards + ' 个可以兑换一张卡的动态卡面（HR），' +
+          '兑换后图鉴里可以切「动态卡面」，大图与格子都能播；' +
+          '动态卡面与原卡面**共享特殊工艺**（原卡有平闪/全闪/红碎，动态形态也一样）。',
+      }),
+      el('p', {
+        class: 'panel-hint',
+        text:
+          '共 ' + fmt(cards.length) + ' 张卡配了动态卡面，已解锁 ' + fmt(unlocked) + ' 张。' +
+          'HR 碎片**不能**换抽卡券 —— 它只有这一个用途；来源是抽到重复的**全闪**卡（普通池与逐梦池都返）。',
+      }),
+      el('div', { class: 'hr-rows' }, rows),
+      have >= cfg.shards ? null : el('p', { class: 'panel-hint', text: '还差 ' + fmt(cfg.shards - have) + ' 个碎片才能换第一张。' }),
+    ])
+  }
 
   /**
    * 碎片兑换。
@@ -3459,7 +3781,9 @@
     }
 
     var status = S.status(dataWithState())
-    var anyShards = status.some(function (r) { return r.have > 0 })
+    // ⚠️ 「有没有碎片」不能只看档位表：HR 碎片不在这张表里，
+    // 只看档位的话「有 25 个 HR 碎片」的人会看到「还没有任何碎片」（自相矛盾的页面）
+    var anyShards = status.some(function (r) { return r.have > 0 }) || hrShardTotal() > 0
     if (!anyShards) {
       wrap.appendChild(
         emptyBox('还没有任何碎片', [
@@ -3468,6 +3792,10 @@
         ])
       )
     }
+
+    // ---- HR 碎片 → 动态卡面（用户 2026-09-19）----
+    var hrPanel = hrShardPanel()
+    if (hrPanel) wrap.appendChild(hrPanel)
 
     // ---- 碎片 -> 抽卡券（用户要求 SR 5:1 / SSR 1:1 / UR 1:5 / SP 1:25）----
     //
@@ -3624,6 +3952,14 @@
         if (!row) return
         var batches = btn.getAttribute('data-ticket-action') === 'all' ? row.batches : 1
         doTicketExchange(rarityId, batches)
+      })
+    })
+
+    // HR 碎片 -> 动态卡面（与图鉴大图里那个「兑换动态卡面」是同一件事、同一个函数）
+    view.querySelectorAll('.hr-unlock').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var cardId = btn.getAttribute('data-card')
+        if (cardId) doUnlockHr(cardId)
       })
     })
   }
@@ -3935,6 +4271,286 @@
   // -------------------------------------------------------------------------
   // ⑥ 板块：抽卡记录
   // -------------------------------------------------------------------------
+
+  /**
+   * 每日签到（用户 2026-09-19）。
+   *
+   * 原话：「每日登录赠送的点数改为签到领取，签到按钮每天凌晨 3 点刷新。
+   *   签到的时候，会从已拥有的卡牌中随机挑选一张 UR/SP 卡牌（纪念卡无法被抽取），
+   *   根据卡牌种类获得额外点数：A 乘以 B。A=2/5（UR/SP），B=1/2/5/15
+   *   （平卡/面闪/全闪/红碎）。这个卡牌抽取结果可以进行三次重抽，重抽后也保留
+   *   原本的卡，相当于用户可以自行从四张卡中选择。」
+   *
+   * 规则全部在 `page/draw.js`（`checkinState` / `checkinRoll` / `checkinClaimAfter`），
+   * 页面只负责画与点 —— 静态站与动态站、浏览器与服务端都是同一份。
+   */
+  function viewCheckin() {
+    var view = state.els.view
+    var wrap = el('div', { class: 'sec' })
+    var g = G()
+    var now = Date.now()
+    if (!g || typeof g.checkinState !== 'function') {
+      wrap.appendChild(
+        emptyBox('规则模块没有加载', [
+          'page/draw.js 没有加载成功，所以现在算不出今天能不能签到。',
+          '看浏览器 Console 的报错（多半是资源 404 或 CSP 拦了）。',
+        ])
+      )
+      view.appendChild(wrap)
+      return
+    }
+    var st = g.checkinState(dataWithState(), now)
+    var serverMode = BACKEND && state.unlocked
+
+    wrap.appendChild(
+      sectionHead('每日签到', '每天可以领一次点数：基础 ' + fmt(st.base) + ' 点，外加一张已有 UR / SP 卡按种类给的点数。', [
+        el('span', { class: 'pill', text: '凌晨 ' + fmt(dailyRefreshHour()) + ' 点刷新' }),
+      ])
+    )
+
+    if (!st.enabled) {
+      wrap.appendChild(emptyBox('签到已经关闭', ['作者把每日点数关掉了（后台「每日签到」一节）。']))
+      view.appendChild(wrap)
+      return
+    }
+
+    if (READONLY) {
+      wrap.appendChild(
+        el('div', { class: 'panel' }, [
+          el('div', { class: 'panel-title', text: '这是静态站：签到记录只存在你自己的浏览器里' }),
+          el('p', { class: 'panel-hint', text: '静态站没有服务端，所以「今天领过了没有」保存在本机（localStorage）。换台机器/清缓存就能再领一次 —— 这是静态站的固有限制，不是 bug。' }),
+        ])
+      )
+    }
+    if (BACKEND && !state.unlocked) {
+      wrap.appendChild(
+        el('div', { class: 'panel' }, [
+          el('div', { class: 'panel-title', text: '提示：签到需要先解锁秘钥' }),
+          el('p', { class: 'panel-hint', text: '签到会改动你的点数，所以动态站上要求先输编辑秘钥。你现在可以看，但点签到会被拒。' }),
+        ])
+      )
+    }
+
+    // ---- 候选卡 -----------------------------------------------------------
+    var cardsBox = el('div', { class: 'checkin-cards' })
+    if (st.rolls.length) {
+      st.rolls.forEach(function (r, i) {
+        var card = cardById(r.cardId)
+        var cell = el('div', { class: 'checkin-card' + (st.claimed === r.cardId ? ' checkin-card-picked' : '') })
+        // 卡面用静态图（这里不是图鉴，不需要视频；动态形态去图鉴看）
+        if (card) cell.appendChild(cardFigure(card, { finish: finishFor(card.id) }))
+        cell.appendChild(
+          el('div', { class: 'checkin-card-meta' }, [
+            el('div', { class: 'checkin-card-name', text: (card && card.name) || r.cardId }),
+            el('div', { class: 'checkin-card-kind', text: checkinKindLabel(r) }),
+            el('div', { class: 'checkin-card-points', text: '+' + fmt(r.points) + ' 点' }),
+          ])
+        )
+        if (st.claimed === r.cardId) {
+          cell.appendChild(el('div', { class: 'checkin-picked', text: '已选这张' }))
+        } else if (!st.claimed) {
+          var take = el('button', {
+            class: 'btn primary checkin-take',
+            type: 'button',
+            'data-card': r.cardId,
+            'data-index': String(i),
+          }, ['领这一张'])
+          take.addEventListener('click', function () { doCheckinClaim(r.cardId) })
+          cell.appendChild(take)
+        }
+        cardsBox.appendChild(cell)
+      })
+    }
+
+    // ---- 操作区 -----------------------------------------------------------
+    var actions = el('div', { class: 'checkin-actions' })
+    if (st.done) {
+      actions.appendChild(
+        el('div', { class: 'checkin-note' }, [
+          '今天已经领过了，下次刷新：' + fmtDate(st.nextRefreshAt) + '。',
+        ])
+      )
+    } else if (st.poolSize === 0) {
+      // 一张 UR/SP 都没有：**只能领基础点数**，并说清为什么没有额外点数
+      actions.appendChild(
+        el('div', { class: 'checkin-note' }, [
+          '你还没有 UR / SP 的卡，所以这次只有基础 ' + fmt(st.base) + ' 点（额外点数是按已有卡的档位与工艺给的）。',
+        ])
+      )
+      var baseBtn = el('button', { class: 'btn primary checkin-roll', type: 'button' }, ['签到领取 ' + fmt(st.base) + ' 点'])
+      baseBtn.addEventListener('click', function () { doCheckinClaim('') })
+      actions.appendChild(baseBtn)
+    } else {
+      var rollBtn = el('button', {
+        class: 'btn primary checkin-roll',
+        type: 'button',
+        'data-rolls-left': String(st.rollsLeft),
+      }, [st.rolls.length ? '重抽（还剩 ' + fmt(st.rollsLeft) + ' 次）' : '签到'])
+      // 开满了或不能开 -> 禁用并说明（点了没反应的按钮最像坏了）
+      if (!st.canRoll) {
+        rollBtn.disabled = true
+        rollBtn.textContent = '4 张都开出来了'
+      } else {
+        rollBtn.addEventListener('click', function () { doCheckinRoll() })
+      }
+      actions.appendChild(rollBtn)
+      actions.appendChild(
+        el('div', { class: 'checkin-note' }, [
+          st.rolls.length
+            ? '还可以重抽 ' + fmt(st.rollsLeft) + ' 次；重抽**不会**丢掉已经开出来的卡，最后从这几张里挑一张领。'
+            : '点「签到」开第一张；之后可以重抽 3 次，一共 4 张里挑一张领。',
+        ])
+      )
+    }
+    /**
+     * 旧机制留下的标记要说一句。
+     *
+     * 2026-09-19 之前是「打开页面自动送 300 点」，那个标记（`player.lastGift`）
+     * 可能存在于**任何今天来过的人**的存档里。新签到不认它（见 draw.js 的
+     * checkinState），但读者如果刚好记得「今天已经领过 300 点了」，会觉得这是 bug ——
+     * 所以明说一句，顺便解释点数为什么会多一份。
+     */
+    if (st.legacyGiftToday) {
+      actions.appendChild(
+        el('div', { class: 'checkin-note' }, [
+          '（旧版的「打开就送 300 点」今天已经发过一次；签到是另一个入口，今天照样可以领一次。）',
+        ])
+      )
+    }
+    wrap.appendChild(actions)
+    wrap.appendChild(cardsBox)
+
+    // ---- 规则说明（写清 A×B，读者才知道自己在挑什么）----------------------
+    var cfg = g.dailyConfig(dataWithState())
+    // 工艺清单取自 draw.js（唯一真源）；拿不到时退回三档 —— 与别处同一条纪律
+    var kindKeys = [''].concat(Array.isArray(g.FOIL_IDS) ? g.FOIL_IDS : ['flat', 'full', 'shatter'])
+    wrap.appendChild(
+      el('div', { class: 'panel checkin-rules' }, [
+        el('div', { class: 'panel-title', text: '额外点数怎么算' }),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '额外点数 = A（卡牌档位）× B（卡牌种类）。' +
+            'A：' + cfg.rarities.map(function (rid) {
+              var r = rarityById(rid)
+              return ((r && (r.label || r.id)) || rid) + ' = ' + fmt(cfg.rarityFactor[rid] || 0)
+            }).join(' / ') +
+            '；B：' + kindKeys.map(function (k) {
+              return (k ? foilLabel(k) : '平卡') + ' = ' + fmt(cfg.foilFactor[k] || 0)
+            }).join(' / ') + '。',
+        }),
+        el('p', {
+          class: 'panel-hint',
+          text: '一张卡同时拥有多种工艺时按**最高的那一档**算（红碎 > 全闪 > 面闪 > 平卡）。纪念卡不参与抽取。',
+        }),
+      ])
+    )
+
+    view.appendChild(wrap)
+  }
+
+  /** 签到里那张卡的「种类」文案：平卡 / 平闪 / 全闪 / 红碎 + 档位 label（SP 不是 ???） */
+  function checkinKindLabel(roll) {
+    var fin = roll && roll.finish ? String(roll.finish) : ''
+    var rid = (roll && roll.rarity) || ''
+    var r = rarityById(rid)
+    return (fin ? foilLabel(fin) : '平卡') + ' · ' + ((r && (r.label || r.id)) || rid)
+  }
+
+  /** 签到刷新的小时（读者看的那句话里要用，缺配置时按 3 点） */
+  function dailyRefreshHour() {
+    var g = G()
+    if (g && typeof g.dailyConfig === 'function') return g.dailyConfig(dataWithState()).refreshHour
+    var d = (state.data && state.data.settings && state.data.settings.daily) || {}
+    return Number(d.refreshHour === undefined ? 3 : d.refreshHour)
+  }
+
+  /** 时间戳 -> 「9 月 20 日 03:00」（签到页显示下次刷新用） */
+  function fmtDate(ts) {
+    var d = new Date(Number(ts) || Date.now())
+    var p = function (n) { return (n < 10 ? '0' : '') + n }
+    return (d.getMonth() + 1) + ' 月 ' + d.getDate() + ' 日 ' + p(d.getHours()) + ':' + p(d.getMinutes())
+  }
+
+  /**
+   * 开一张签到候选（重抽也是它）。
+   *
+   * **本地先开、再同步**（与抽卡同一条架构）：随机在浏览器里，服务端负责校验与记账。
+   * 之所以不「等服务端开完再用」，是因为服务端那条路由要重启才存在 ——
+   * 而页面刷新就生效的那些改动不该被一个还没重启的后端卡住。同步失败时
+   * **本机照样记着**，并用 toast 说清「本机记了、服务端没记」。
+   */
+  function doCheckinRoll() {
+    var g = G()
+    if (!g || typeof g.checkinRoll !== 'function') {
+      toast('规则模块没加载，暂时不能签到', 'error')
+      return
+    }
+    var st = g.checkinState(dataWithState(), Date.now())
+    if (!st.canRoll) {
+      toast(st.done ? '今天已经领过了' : st.poolSize === 0 ? '还没有 UR / SP 的卡可以开' : '重抽次数用完了', 'error')
+      return
+    }
+    // 候选不重复：把今天已经开出来的卡 id 传进去（池子小的时候才不会开出两张一样的）
+    var already = st.rolls.map(function (r) { return r.cardId })
+    var roll = g.checkinRoll(dataWithState(), Math.random, already)
+    if (!roll) {
+      toast('候选已经全部开过了（池子里没有别的 UR / SP）', 'error')
+      return
+    }
+    var local = localState()
+    // `done: false` 是**明确写的**：开奖不改变「今天领过没有」，但也不能顺手把
+    // 一个 true（比如旧版的遗留状态）带进去 —— 那会让领取被判成「已经领过了」
+    local.checkin = { date: st.day, rolls: st.rolls.concat([roll]), claimed: '', done: false }
+    saveLocal(local)
+    applyStateToSnapshot({ checkin: local.checkin })
+    render()
+    if (BACKEND && state.unlocked) {
+      // 服务端会**重算点数**并校验这张卡真的在候选池里（不信前端送的数字）
+      request('/player/checkin', { method: 'POST', body: { action: 'roll', roll: roll } })
+        .then(function (res) { if (res && res.player && state.data) state.data.player = res.player })
+        .catch(function (err) {
+          console.warn('[gacha] 签到开奖同步失败（候选已记在本机）：', err && err.message)
+          toast('已在打开这张，但同步到服务端失败：' + ((err && err.message) || err), 'error')
+        })
+    }
+  }
+
+  /**
+   * 领取某一张（`cardId` 为空串 = 池子里没有 UR/SP，只领基础点数）。
+   *
+   * 三道校验都在 `checkinClaimAfter` 里（今天领过没有、这张卡在不在今天的候选里、
+   * 功能开着没有），本地与**服务端**用的是同一个函数 —— 点两次按钮不会翻倍。
+   * 同样是「本地先记、再同步」。
+   */
+  function doCheckinClaim(cardId) {
+    var g = G()
+    if (!g || typeof g.checkinClaimAfter !== 'function') {
+      toast('规则模块没加载，暂时不能签到', 'error')
+      return
+    }
+    var after = g.checkinClaimAfter(dataWithState(), cardId, Date.now())
+    if (!after.ok) {
+      toast(after.reason, 'error')
+      return
+    }
+    var local = localState()
+    local.points = Math.max(0, Number(local.points || 0)) + after.points
+    local.lastGift = after.date
+    local.checkin = after.checkin
+    saveLocal(local)
+    applyStateToSnapshot({ points: local.points, lastGift: local.lastGift, checkin: local.checkin })
+    render()
+    toast('签到成功：+' + fmt(after.points) + ' 点' + (after.bonus ? '（额外 ' + fmt(after.bonus) + ' 点）' : ''), 'ok')
+    if (BACKEND && state.unlocked) {
+      request('/player/checkin', { method: 'POST', body: { action: 'claim', cardId: cardId || '' } })
+        .then(function (res) { if (res && res.player && state.data) state.data.player = res.player })
+        .catch(function (err) {
+          console.warn('[gacha] 签到领取同步失败（点数已记在本机）：', err && err.message)
+          toast('点数已记在本机，但同步到服务端失败：' + ((err && err.message) || err), 'error')
+        })
+    }
+  }
 
   function viewHistory() {
     var view = state.els.view
@@ -4451,6 +5067,8 @@
         field('卡池 UI 目录（主视觉/横幅，一行一个，受控白名单）', textarea(poolUiDirs.join('\n'), 3, 'pool-ui-dirs')),
         // 关注页配图目录：同样只转发、不扫描（放 imageDirs 里会被扫成一张卡）
         field('关注页配图目录（扫码图等，一行一个，受控白名单）', textarea((Array.isArray(s.linkDirs) ? s.linkDirs : []).join('\n'), 2, 'link-dirs')),
+        // 动态卡面（HR）目录：视频走 api/media，同样只转发、不扫描
+        field('动态卡面（HR）目录（mp4 / webm，一行一个，受控白名单）', textarea((Array.isArray(s.dynamicDirs) ? s.dynamicDirs : []).join('\n'), 2, 'dynamic-dirs')),
         el('div', { class: 'panel-sub' }, rarityOpts.map(function (r) {
           return field(
             '表情包 · ' + (r.label || r.id) + '（文件名，留空 = 这一档不弹）',
@@ -4758,6 +5376,60 @@
       ])
     )
 
+    // --- 每日签到 / HR / 重复闪卡返还（用户 2026-09-19 那一批）-------------
+    var dailyCfg = s.daily || {}
+    var hrCfg2 = s.hr || {}
+    var dupCfg = s.dupReward || {}
+    var rf = dailyCfg.rarityFactor || {}
+    var ff = dailyCfg.foilFactor || {}
+    var A_IDS = Array.isArray(dailyCfg.rarities) && dailyCfg.rarities.length ? dailyCfg.rarities : ['UR', '???']
+    wrap.appendChild(
+      el('div', { class: 'panel' }, [
+        el('div', { class: 'panel-title', text: '③-7 每日签到 / HR 动态卡面 / 重复闪卡返还' }),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '每日点数改成**签到领取**（不再自动发放）：基础点数额度 + 从已拥有的 UR/SP 里随机开一张，' +
+            '按「A（档位）× B（工艺）」给额外点数；可以重抽几次，最后从开出来的那几张里挑一张领。' +
+            '凌晨按下面的小时刷新（本地时间）。',
+        }),
+        field('启用签到', select(['true', 'false'], String(dailyCfg.enabled !== false), 'daily-on')),
+        field('每天基础点数', input('number', dailyCfg.points === undefined ? 300 : dailyCfg.points, 'daily-points')),
+        field('重抽次数（1 + 这个数 = 候选张数）', input('number', dailyCfg.rerolls === undefined ? 3 : dailyCfg.rerolls, 'daily-rerolls')),
+        field('几点刷新（0~23）', input('number', dailyCfg.refreshHour === undefined ? 3 : dailyCfg.refreshHour, 'daily-hour')),
+        el('div', { class: 'panel-sub', text: 'A：档位系数（只有下面这两档能被开出来）' }),
+        field('A · ' + ((rarityById('UR') || {}).label || 'UR') + '（UR）', input('number', rf.UR === undefined ? 2 : rf.UR, 'daily-a-UR')),
+        field('A · ' + ((rarityById('???') || {}).label || 'SP') + '（SP）', input('number', rf['???'] === undefined ? 5 : rf['???'], 'daily-a-sp')),
+        el('div', { class: 'panel-sub', text: 'B：工艺系数' }),
+        field('B · 平卡（没有任何工艺）', input('number', ff[''] === undefined ? 1 : ff[''], 'daily-b-none')),
+        field('B · ' + foilLabel('flat'), input('number', ff.flat === undefined ? 2 : ff.flat, 'daily-b-flat')),
+        field('B · ' + foilLabel('full'), input('number', ff.full === undefined ? 5 : ff.full, 'daily-b-full')),
+        field('B · ' + foilLabel('shatter'), input('number', ff.shatter === undefined ? 15 : ff.shatter, 'daily-b-shatter')),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            'HR 动态卡面：**不能抽取**，只能用 HR 碎片兑换（下面这个数量）。' +
+            '动态卡面与原卡面共享特殊工艺 —— 原卡有平闪/全闪/红碎，动态形态也一样。',
+        }),
+        field('兑换一张动态卡面要几个 HR 碎片', input('number', hrCfg2.shards === undefined ? 20 : hrCfg2.shards, 'hr-shards')),
+        field('启用 HR 兑换', select(['true', 'false'], String(hrCfg2.enabled !== false), 'hr-on')),
+        el('p', {
+          class: 'panel-hint',
+          text:
+            '重复的**闪卡**额外返还（普通池与逐梦池都给）：面闪再给一点点数，全闪再给 1 个 HR 碎片（HR 碎片是换动态卡面用的）。',
+        }),
+        field('重复' + foilLabel('flat') + '额外返几点', input('number', dupCfg.flatPoints === undefined ? 1 : dupCfg.flatPoints, 'dup-flat-points')),
+        field('重复' + foilLabel('full') + '额外返几个 HR 碎片', input('number', dupCfg.fullHrShards === undefined ? 1 : dupCfg.fullHrShards, 'dup-full-hr')),
+        el('div', { class: 'panel-actions' }, [
+          el('button', { class: 'btn primary', type: 'button', 'data-bind': 'save-daily' }, ['保存这一组']),
+        ]),
+        el('p', { class: 'panel-hint', text: '当前能被开出来的档位：' + A_IDS.map(function (rid) {
+          var r = rarityById(rid)
+          return (r && (r.label || r.id)) || rid
+        }).join(' / ') + '（用户要求只有 UR / SP；要改档位清单请直接改 data.json 的 settings.daily.rarities）。' }),
+      ])
+    )
+
     // --- 秘钥 -------------------------------------------------------------
     wrap.appendChild(
       el('div', { class: 'panel' }, [
@@ -4849,6 +5521,7 @@
           el('th', { text: '系列' }),
           el('th', { text: '系列内序' }),
           el('th', { text: '图片' }),
+          el('th', { text: '动态卡面' }),
           el('th', { text: '状态' }),
           el('th', { text: '操作' }),
         ]),
@@ -4893,6 +5566,9 @@
           el('td', {}, [seriesInput]),
           el('td', {}, [input('number', c.seriesOrder || 0, 'card-order-' + c.id)]),
           el('td', { class: 'cell-img', text: c.image || '(未填)' }),
+          // 动态卡面（HR）：填视频文件名（放在「动态卡面（HR）目录」里）。
+          // 留空 = 这张没有动态卡面，大图里只显示静态图。
+          el('td', {}, [input('text', c.dynamic, 'card-dynamic-' + c.id)]),
           el('td', {}, [
             c.hidden ? el('span', { class: 'chip chip-warn', text: '已隐藏' }) : el('span', { class: 'chip', text: '显示中' }),
             c.rarityKnown ? null : el('div', { class: 'cell-warn', text: '稀有度不认识' }),
@@ -5073,6 +5749,93 @@
       })
     }
 
+    /**
+     * ③-7 那一组：签到 / HR / 重复闪卡返还。
+     *
+     * 与 ③-6 同一套做法：**先全部校验、再一次性提交** ——
+     * 写一半的配置（比如 A 改对了、B 写错了）会让签到算出来的点数悄悄不对，
+     * 而页面上只显示一个数字。
+     */
+    var saveDaily = q('save-daily')
+    if (saveDaily) {
+      saveDaily.addEventListener('click', function () {
+        var readNum = function (bind, label) {
+          var node = q(bind)
+          var raw = node ? String(node.value).trim() : ''
+          var n = raw === '' ? 0 : Number(raw)
+          if (!Number.isFinite(n) || n < 0) {
+            window.alert(label + ' 要写成 0 或正整数，现在是：' + raw)
+            return null
+          }
+          return Math.floor(n)
+        }
+        var vals = {}
+        var specs = [
+          ['daily-points', '每天基础点数'],
+          ['daily-rerolls', '重抽次数'],
+          ['daily-hour', '刷新小时'],
+          ['daily-a-UR', 'A · UR'],
+          ['daily-a-sp', 'A · SP'],
+          ['daily-b-none', 'B · 平卡'],
+          ['daily-b-flat', 'B · ' + foilLabel('flat')],
+          ['daily-b-full', 'B · ' + foilLabel('full')],
+          ['daily-b-shatter', 'B · ' + foilLabel('shatter')],
+          ['hr-shards', '兑换动态卡面要几个 HR 碎片'],
+          ['dup-flat-points', '重复面闪额外返几点'],
+          ['dup-full-hr', '重复全闪额外返几个 HR 碎片'],
+        ]
+        for (var i = 0; i < specs.length; i++) {
+          var v = readNum(specs[i][0], specs[i][1])
+          if (v === null) return
+          vals[specs[i][0]] = v
+        }
+        if (vals['daily-hour'] > 23) {
+          window.alert('刷新小时要写在 0~23 之间（现在是 ' + vals['daily-hour'] + '）')
+          return
+        }
+        if (vals['daily-rerolls'] > 20) {
+          window.alert('重抽次数最多 20（现在是 ' + vals['daily-rerolls'] + '）')
+          return
+        }
+        if (vals['hr-shards'] < 1) {
+          window.alert('兑换动态卡面的碎片数至少要 1（现在是 ' + vals['hr-shards'] + '）')
+          return
+        }
+        var dailyOn = q('daily-on')
+        var hrOn = q('hr-on')
+        // 档位清单**原样带回去**：它决定「谁能被开出来」，而这里没有对应的输入框。
+        // 不回传的话会被归一化退回默认的 UR/SP —— 看起来没事，但作者手改过的
+        // 清单会在下一次保存时被悄悄覆盖掉。
+        // ⚠️ 这个数组在 `viewAdmin` 的作用域里（渲染时算的），保存这里是另一个函数，
+        // 拿不到它 —— 必须就地重算（第一版直接用了 `A_IDS`，一点保存就 ReferenceError）
+        var curDaily = (state.data && state.data.settings && state.data.settings.daily) || {}
+        var aIds = Array.isArray(curDaily.rarities) && curDaily.rarities.length ? curDaily.rarities.slice() : ['UR', '???']
+        request('/settings.json', {
+          method: 'POST',
+          body: {
+            daily: {
+              enabled: dailyOn ? dailyOn.value !== 'false' : true,
+              points: vals['daily-points'],
+              rerolls: vals['daily-rerolls'],
+              refreshHour: vals['daily-hour'],
+              // 档位清单不在这里改（它决定「谁能被开出来」，改错了会静默改掉规则）
+              rarities: aIds,
+              rarityFactor: { UR: vals['daily-a-UR'], '???': vals['daily-a-sp'] },
+              foilFactor: {
+                '': vals['daily-b-none'],
+                flat: vals['daily-b-flat'],
+                full: vals['daily-b-full'],
+                shatter: vals['daily-b-shatter'],
+              },
+            },
+            hr: { enabled: hrOn ? hrOn.value !== 'false' : true, shards: vals['hr-shards'] },
+            dupReward: { enabled: true, flatPoints: vals['dup-flat-points'], fullHrShards: vals['dup-full-hr'] },
+          },
+        })
+          .then(function (res) { afterWrite(res, '签到 / HR / 重复返还已保存') })
+          .catch(fail)
+      })
+    }
     var saveSettings = q('save-settings')
     if (saveSettings) {
       saveSettings.addEventListener('click', function () {
@@ -5346,6 +6109,12 @@
               .map(function (x) { return x.trim() })
               .filter(Boolean)
           : []
+        var dynamicDirsNext = q('dynamic-dirs')
+          ? q('dynamic-dirs')
+              .value.split('\n')
+              .map(function (x) { return x.trim() })
+              .filter(Boolean)
+          : []
         var emoji = {}
         var emojiRaritiesNext = []
         for (var j = 0; j < rar.length; j++) {
@@ -5362,6 +6131,7 @@
             emojiDirs: emojiDirsNext,
             poolUiDirs: poolUiDirsNext,
             linkDirs: linkDirsNext,
+            dynamicDirs: dynamicDirsNext,
             emoji: emoji,
             reveal: {
               enabled: enabledSel ? enabledSel.value !== 'false' : true,
@@ -5548,6 +6318,7 @@
         var rarityInput = view.querySelector('[data-card-rarity="' + id + '"]')
         var seriesInput = view.querySelector('[data-bind="card-series-' + id + '"]')
         var orderInput = view.querySelector('[data-bind="card-order-' + id + '"]')
+        var dynInput = view.querySelector('[data-bind="card-dynamic-' + id + '"]')
         var name = nameInput ? nameInput.value : ''
         var orderRaw = orderInput ? String(orderInput.value).trim() : ''
         request('/card/' + encodeURIComponent(id), {
@@ -5558,6 +6329,8 @@
             // 系列留空 = 不属于任何系列（normalize 会存成空串）
             series: seriesInput ? seriesInput.value : '',
             seriesOrder: orderRaw === '' ? 0 : Number(orderRaw),
+            // 动态卡面（HR）：视频文件名；留空 = 取消这张的动态卡面
+            dynamic: dynInput ? String(dynInput.value).trim() : '',
           },
         })
           .then(function (res) { afterWrite(res, '已保存 ' + name) })
@@ -5984,6 +6757,229 @@
     else window.clearTimeout(id)
   }
 
+  /**
+   * 大图里的卡面：静态图 还是 动态卡面（HR 视频）。
+   *
+   * 为什么默认只在大图里播：图鉴一页有两百多张卡，每张都挂一个 `<video>` 会让
+   * 浏览器同时解码几十路视频 —— 那是必然的卡死。抽卡结果与抽卡动画里用的是静态图
+   * （`cardFigure` 只加一个「动」角标提示这张有动态版本）。
+   * 2026-09-19 起图鉴多了一个**读者自己开的**动态模式：只给「已解锁 HR」的卡建
+   * `<video>`，并且只播视口内的那几路（见 GRID_VIDEO_MAX）。
+   *
+   * @param {object} card 卡牌（读 imageUrl / dynamicUrl）
+   * @param {Element} img  `#card-dialog-img`
+   * @param {Element} nofile 占位提示
+   */
+  function paintDialogMedia(card, img, nofile) {
+    var video = state.els.cardDialogVideo
+    var hasDynamic = !!(card && card.dynamicUrl)
+    /**
+     * 静态图与动态卡面是**切换**关系，不是叠加关系。
+     *
+     * 用户 2026-09-19 的截图：大图里静态图与视频**同时**显示，一上一下摞成一列。
+     * 根因有两条，缺一条都不会有那么明显的症状：
+     *   ① 这里以前把 `img.hidden` 无条件设成 false（只要有静态图就显示）；
+     *   ② `.card-dialog-video { display: block }` 是一条作者样式，而 `hidden`
+     *      属性靠的是 UA 样式表里的 `[hidden] { display: none }` —— 作者样式
+     *      **永远赢**，于是 `el.hidden = true` 对这两个元素压根不生效。
+     *      ② 的补丁在 page.css 的全局 `[hidden]` 规则里（那条对所有元素都生效）。
+     *
+     * 判据只有一条 `showVideo`，`<img>` 与 `<video>` 的显隐全由它推出来 ——
+     * 两处各判一次，迟早会不一致。
+     *
+     * ⚠️ 2026-09-19 起还多了**解锁**这一关：动态卡面是花 20 个 HR 碎片换来的
+     * （用户：「使用 20 张 HR 碎片，即可兑换对应卡牌的 HR 动态卡面」），
+     * 所以没解锁的卡在大图里也只显示静态卡面 —— 否则那个兑换就没有任何意义了。
+     */
+    var unlocked = hasDynamic && hrUnlocked(card.id)
+    var videoDead = !!(video && unlocked && video.__hrDead === card.dynamicUrl)
+    var showVideo = unlocked && !videoDead
+
+    if (img) {
+      if (card.imageUrl) {
+        // src **一直留着**：视频的 poster 要它，视频读不到时的回退也要它（瞬时切换）
+        img.src = card.imageUrl
+        img.alt = (card.name || '卡面') + ' 大图'
+        img.hidden = showVideo
+      } else {
+        // 没有图不是错误，是「还没配」——要和大图读不到区分开
+        img.hidden = true
+        img.removeAttribute('src')
+        img.alt = ''
+      }
+    }
+
+    if (video) {
+      if (!showVideo) {
+        // 换卡时先收干净：把上一张的视频停掉，避免它在后台继续解码
+        try {
+          video.pause()
+        } catch (e) {}
+        video.hidden = true
+        // 只有「这张卡没配动态卡面」才清 src。读不到的那种把 src 留着：
+        // 它已经失败过一次，留着不会再产生新请求，还能在 devtools 里看见是哪一段
+        if (!hasDynamic) {
+          video.__hrUrl = ''
+          video.removeAttribute('src')
+          try {
+            video.load()
+          } catch (e) {}
+        }
+      } else {
+        var wantPlay = animEnabled() && !prefersReducedMotion()
+        if (video.getAttribute('src') !== card.dynamicUrl) {
+          video.setAttribute('src', card.dynamicUrl)
+          if (card.imageUrl) video.setAttribute('poster', card.imageUrl) // 还没就绪时先顶一张
+          video.__hrUrl = card.dynamicUrl
+          if (!video.__hrWired) {
+            video.__hrWired = true
+            video.addEventListener('error', function () {
+              /**
+               * 视频读不到**不是**「什么都没发生」：退回静态图，并说清原因。
+               *
+               * 记在元素上的是**失败的那个 URL**，然后照当前这张卡重画一遍媒体区 ——
+               * 不在这里手写 `img.hidden = false`：那样等于把「谁显示」的规则抄成
+               * 第二份，而第二份迟早会跟第一份不一致（这次的 bug 就是这么来的）。
+               * 重画走的是同一条 `showVideo` 判据，反过来也保证不会再试同一段视频。
+               */
+              var url = video.getAttribute('src')
+              if (!url) return
+              video.__hrDead = url
+              var hint = state.els.cardDialogHint
+              if (hint) hint.textContent = '动态卡面读不到（' + (video.__hrName || url) + '），已退回静态卡面。'
+              console.warn('[gacha] 动态卡面加载失败：' + (video.__hrName || url))
+              paintDialogMedia(cardById(state.cardOpen) || card, state.els.cardDialogImg, state.els.cardDialogNofile)
+            })
+          }
+        }
+        video.__hrName = card.dynamic || card.dynamicUrl
+        video.hidden = false
+        /**
+         * 自动播放的三个前提**也在 JS 里设一遍**（不止写在 page.html 上）。
+         *
+         * 属性是页面上声明的最稳（元素解析出来就带着），而属性（property）在
+         * 动态创建/替换 src 的场景里更可靠 —— 两处都写，代价是零，少一处就是
+         * 「视频静静地停在那儿」，而页面上不会有任何报错。
+         */
+        video.muted = true
+        video.loop = true
+        video.playsInline = true
+        if (wantPlay) {
+          var p = video.play && video.play()
+          // 自动播放被浏览器拦下是常态（策略差异），不该报错刷屏：
+          // 停下来就是一张海报，读者照样看得到卡面
+          if (p && typeof p.catch === 'function') p.catch(function () {})
+        } else {
+          try {
+            video.pause()
+          } catch (e) {}
+        }
+      }
+    }
+
+    // 占位提示的判据是「**实际能显示什么**」，不是「配置里写了什么」：
+    // 配了视频但读不到、又没有静态图时，大图里真的什么都没有，提示必须出来
+    if (nofile) nofile.hidden = !!(card.imageUrl || showVideo)
+  }
+
+  /**
+   * 大图里的「兑换动态卡面（HR）」按钮与 HR 标识。
+   *
+   * 用户 2026-09-19：「动态卡牌归属于 HR 的稀有度，同样不可以抽取，但是可以合成，
+   * 需要消耗 HR 碎片」＋「使用 20 张 HR 碎片，即可兑换对应卡牌的 HR 动态卡面，
+   * 动态卡面与原卡面共享特殊工艺」。
+   *
+   * 判定全部走 `page/draw.js` 的 `canUnlockHr`（与服务端 `POST api/player/hr`
+   * 是同一份规则），这里只负责画与说明「为什么现在不能换」——
+   * 碎片不够 / 没配动态卡面 / 已经解锁过，是**三种不同的原因**，不能糊成一句。
+   */
+  function paintHrButton(card) {
+    var hrBtn = state.els.cardDialogHr
+    var chips = state.els.cardDialogChips
+    if (!hrBtn) return
+    var hasArt = !!(card && card.dynamicUrl)
+    if (!hasArt) {
+      hrBtn.hidden = true
+      hrBtn.textContent = ''
+      hrBtn.removeAttribute('data-card')
+      return
+    }
+    if (hrUnlocked(card.id)) {
+      // 已经解锁：按钮没有存在的意义，改成在标题旁挂一个 HR 标识 ——
+      // 那是「这张卡有动态形态」的唯一凭据（图鉴格子上只有一个「动」字）
+      hrBtn.hidden = true
+      hrBtn.textContent = ''
+      hrBtn.removeAttribute('data-card')
+      if (chips) chips.appendChild(el('span', { class: 'hr-chip', text: 'HR · 动态卡面' }))
+      return
+    }
+    var g = G()
+    var check = g && typeof g.canUnlockHr === 'function' ? g.canUnlockHr(dataWithState(), card.id) : null
+    hrBtn.hidden = false
+    hrBtn.setAttribute('data-card', card.id)
+    if (!check) {
+      // 规则模块没加载：按钮**禁用并说明**，不要让它看起来可以点
+      hrBtn.disabled = true
+      hrBtn.textContent = '规则模块没加载，无法兑换动态卡面'
+      return
+    }
+    hrBtn.disabled = !check.ok
+    hrBtn.textContent =
+      '兑换动态卡面（' + check.cost + ' 个 HR 碎片' + (check.ok ? '' : '，现有 ' + check.have) + '）'
+    if (check.ok) hrBtn.removeAttribute('title')
+    else hrBtn.setAttribute('title', check.reason)
+  }
+
+  /**
+   * 真的去兑换。
+   *
+   * **先本地算、再同步**：静态站没有后端（本地就是权威），动态站则把结果交给服务端
+   * 再判一次并落盘 —— 与抽卡/碎片兑换完全同一套做法。
+   * 本地那一步读的是 `hrUnlockAfter` 的返回值（纯函数），所以「扣了碎片没解锁」
+   * 这种半个状态在本地也不可能出现。
+   */
+  function doUnlockHr(cardId) {
+    var g = G()
+    if (!g || typeof g.hrUnlockAfter !== 'function') {
+      toast('规则模块没加载，暂时不能兑换动态卡面', 'error')
+      return
+    }
+    var after = g.hrUnlockAfter(dataWithState(), cardId)
+    if (!after.ok) {
+      toast(after.reason, 'error')
+      return
+    }
+    var local = localState()
+    local.hr = after.hr
+    local.shards = after.shards
+    saveLocal(local)
+    applyStateToSnapshot({ hr: after.hr, shards: after.shards })
+    var card = cardById(cardId)
+    var done = function () {
+      render()
+      // 弹层不在 #view 里（它是独立的 <dialog>），所以 render() 不会重画它 ——
+      // 不补这一下，读者会看到按钮还在那儿、仿佛没生效
+      if (card && state.cardOpen === cardId) paintCardDialog(card)
+    }
+    if (BACKEND && state.unlocked) {
+      request('/player/hr', { method: 'POST', body: { cardId: cardId } })
+        .then(function (res) {
+          if (res && res.player && state.data) state.data.player = res.player
+          done()
+          toast('已解锁动态卡面（花掉 ' + after.cost + ' 个 HR 碎片）', 'ok')
+        })
+        .catch(function (err) {
+          // 本地已经解锁了：这里必须说清「本机记了、服务端没记」，
+          // 否则读者换个浏览器会发现解锁没了，而原因完全看不到
+          done()
+          toast('已在本机解锁，但同步到服务端失败：' + ((err && err.message) || err), 'error')
+        })
+      return
+    }
+    done()
+    toast('已解锁动态卡面（花掉 ' + after.cost + ' 个 HR 碎片）', 'ok')
+  }
+
   function paintCardDialog(card) {
     var S = window.GachaShards
     var img = state.els.cardDialogImg
@@ -6011,19 +7007,18 @@
 
     // 大图：用卡面上同一份 URL（服务端 / 导出脚本算好的），前端不拼路径
     var nofile = state.els.cardDialogNofile
-    if (img) {
-      if (card.imageUrl) {
-        img.hidden = false
-        img.src = card.imageUrl
-        img.alt = (card.name || '卡面') + ' 大图'
-      } else {
-        // 没有图不是错误，是「还没配」——要和大图读不到区分开
-        img.hidden = true
-        img.removeAttribute('src')
-        img.alt = ''
-      }
-    }
-    if (nofile) nofile.hidden = !!card.imageUrl
+    /**
+     * 动态卡面（HR）：配了视频就用 `<video>`，否则用静态图。
+     *
+     * 三条纪律：
+     *   ① **只在有 dynamicUrl 时**才创建/显示视频（没配的卡一点都不变）；
+     *   ② 视频读不到时**退回静态图并留下痕迹**（与控制台里的报错一起），
+     *      绝不让大图变成一块空白 —— 那是这个项目最忌讳的失败形态；
+     *   ③ 自动播放在「抽卡动画被关掉」或系统「减少动态效果」时**不播**
+     *      （读者已经明确表示不想看动的东西，动态卡面也不该自己动起来）。
+     */
+    paintDialogMedia(card, img, nofile)
+    paintHrButton(card)
 
     var n = Number(collection()[card.id] || 0)
     if (ownerEl) {
@@ -6299,6 +7294,9 @@
     // 上一次渲染留下的轮播定时器必须先停：它持有的是已经被换掉的 DOM 节点，
     // 不停就每渲染一次多攒一个定时器，而且会去改已经不在页面上的元素。
     stopBannerTimer()
+    // 图鉴里那些 <video> 同理：节点马上要被扔掉，观察器必须先松手，
+    // 否则「同时在播几路」的计数只增不减，最后谁都不播（见 resetGridVideos）
+    resetGridVideos()
     var route = parseRoute()
     state.route = route.route
     state.routeArg = route.arg
@@ -6324,6 +7322,7 @@
       if (state.route === 'draw') viewDraw()
       else if (state.route === 'collection') viewCollection()
       else if (state.route === 'shards') viewShards()
+      else if (state.route === 'checkin') viewCheckin()
       else if (state.route === 'history') viewHistory()
       else if (state.route === 'follow') viewFollow()
       else if (state.route === 'admin') viewAdmin()
@@ -6424,6 +7423,13 @@
         var rarityId = e.cardDialogSynth.getAttribute('data-rarity')
         if (!cardId || !rarityId) return
         doExchange(rarityId, 'card', cardId)
+      })
+    }
+    // 兑换动态卡面（HR）：花 HR 碎片换这张卡的动态形态（用户 2026-09-19）
+    if (e.cardDialogHr) {
+      e.cardDialogHr.addEventListener('click', function () {
+        var cardId = e.cardDialogHr.getAttribute('data-card')
+        if (cardId) doUnlockHr(cardId)
       })
     }
     // 大图弹层被 Esc / 点遮罩关掉时，state.cardOpen 也要跟着清掉，
@@ -6562,11 +7568,14 @@
     registerServiceWorker()
     loadData()
       .then(function () {
-        // 每日赠送：每天第一次打开送 300 点（用户要求）。
-        // 放在 render 之前，这样首屏就能看到点数已经到账。
-        var gift = claimDailyGift()
+        /*
+         * ⚠️ 每日赠送**不再自动发放**（用户 2026-09-19：「每日登录赠送的点数改为
+         * 签到领取」）。这里以前会调 claimDailyGift() 直接发 300 点 —— 留着它
+         * 就等于「签到按钮是个摆设，点数照样自动到账」。
+         * 现在点数只从签到页领（`viewCheckin` → `doCheckinClaim`），
+         * 而「今天领过没有」仍然是同一个标记（player.lastGift）。
+         */
         render()
-        if (gift) toast('每日赠送：+' + gift.points + ' 点（每点可以普通抽一次）', 'ok')
         // 公告弹窗：缺纪念卡时引导去重置（用户要求「每次网站打开最多只弹出一次」）。
         // 放在 render 之后、每日赠送提示之后 —— 弹层会盖住页面，先让首屏画完。
         noticeOnce()
