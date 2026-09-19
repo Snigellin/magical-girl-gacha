@@ -34,7 +34,15 @@
  *（页面那一侧见 page.js 的 mirrorAssetUrls / isCrossOrigin / onImageError）。
  */
 
-const CACHE_NAME = 'gacha-img-v2'
+/**
+ * ⚠️ 必须与 page/page.js 的 IMG_CACHE 一致。
+ *
+ * v2 -> v3：镜像的 403（Gitee 的防盗链）曾被当成图片缓存下来（opaque 响应读不出
+ * 状态码），那些读者永远看到坏图。这里改名之后，下面 activate 会把
+ * `gacha-img-` 开头的旧缓存全删掉 —— 加 `no-referrer` 与换缓存名是一件事，
+ * 只做前一半等于没修（他们命中的还是那条毒缓存）。
+ */
+const CACHE_NAME = 'gacha-img-v3'
 
 /** 只有内容寻址的卡面/横幅会进缓存。改这个正则前先读上面第 1、2 条。 */
 const CACHEABLE = /\/assets\/img\/[^/]+$/
@@ -99,8 +107,17 @@ async function cacheFirst(req) {
   const hit = force ? null : await cache.match(req, { ignoreSearch: true })
   if (hit) return hit
   try {
-    // req 自带 cache 模式，所以 fetch(req) 本身就会绕过 HTTP 缓存
-    const res = await fetch(req)
+    /**
+     * req 自带 cache 模式，所以 fetch(req) 本身就会绕过 HTTP 缓存。
+     *
+     * ⚠️ 但 **referrerPolicy 必须显式覆盖成 `no-referrer`**：`fetch(req)` 会把
+     * **客户端请求里的 Referer 原样带上**，而 Gitee 镜像对带 Referer 的请求回
+     * 403（`invalid Referer header`）。更糟的是 no-cors 下那个 403 是 **opaque**
+     * 响应 —— 下面的判据会把「读不到状态码」当成「跨域图片缓存成功」，
+     * 于是把 403 的正文当图片存进 Cache Storage：那位读者从此**永远**看到坏图，
+     * 连请求都不再发出。所以这一行与缓存名一起改（v3），缺一不可。
+     */
+    const res = await fetch(req, { referrerPolicy: 'no-referrer' })
     // 可缓存 = 同源 200（basic）或 CORS 200，**或者跨域镜像的 opaque 响应**。
     // opaque 读不到状态码，但 Cache Storage 允许原样存下来、之后原样喂给 <img>；
     // 不认它的话，镜像的图每次打开都要重新下载（缓存层等于不存在）。

@@ -3,6 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  图片一律**不带 Referer**（用户 2026-09-19 合并贡献者 PR #3 的那条修复）。
+
+  为什么必须这样：静态站的卡面走 Gitee 镜像，而 Gitee 对带 Referer 的请求
+  直接回 403 `{"code":"40310014","msg":"invalid Referer header"}` ——
+  浏览器默认会给跨域图片带上来源页，于是**镜像从来没生效过**，每张图都白等一次
+  403 再回退到慢线路（这正是作者报的「卡面加载缓慢、甚至加载不出来」的成因之一）。
+
+  这一行管住**所有**子资源请求（`<img>`、CSS 里的 `background-image`、
+  fetch/XHR、SW 注册），包括那些没法逐个加属性的地方；下面那些
+  `referrerpolicy="no-referrer"` 则是逐元素的第二道保险（万一这个 meta 被
+  某个代理/压缩器吞掉，或者以后有人把页面嵌到别处）。
+-->
+<meta name="referrer" content="no-referrer">
 <title>魔法少女抽卡</title>
 <link rel="stylesheet" href="assets/page.css?v=9f71a95c">
 <link rel="stylesheet" href="assets/cards.css?v=7bb7a672">
@@ -220,7 +234,7 @@
       <div class="card-dialog-card card-inspect" data-bind="card-dialog-card">
         <!-- draggable="false"：不然按下拖动会变成浏览器自带的「拖这张图」，
              检视手势直接被抢走（page.js 里另有 dragstart 兜底） -->
-        <img class="card-dialog-img" data-bind="card-dialog-img" alt="" draggable="false">
+        <img class="card-dialog-img" data-bind="card-dialog-img" alt="" draggable="false" referrerpolicy="no-referrer">
         <!--
           动态卡面（HR）：这张卡配了视频时用它，否则藏起来用上面那张静态图。
           muted + loop + playsinline 是能自动播放的三个前提（少一个浏览器就不播）；
@@ -266,7 +280,7 @@
 
 <script src="assets/draw.js?v=b4182373"></script>
 <script src="assets/shards.js?v=5e4d2dff"></script>
-<script src="assets/reveal.js?v=2ab38e28"></script>
-<script src="assets/page.js?v=af869a99"></script>
+<script src="assets/reveal.js?v=5e4b22cb"></script>
+<script src="assets/page.js?v=6b9cda1d"></script>
 </body>
 </html>

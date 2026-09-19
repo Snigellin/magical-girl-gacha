@@ -329,6 +329,8 @@
         var img = el(doc, 'img')
         img.setAttribute('src', url)
         img.setAttribute('alt', '抽到了！')
+        // 表情包也是镜像图（静态站上走 Gitee），带 Referer 会被 403 拒掉 —— 见 page.html 的 meta
+        img.setAttribute('referrerpolicy', 'no-referrer')
         img.addEventListener('error', function () {
           // 表情包读不到不能静默 —— 但也不该挡住动画，所以在框里写一行原因
           emojiBox.textContent = ''

@@ -931,7 +931,7 @@
         title: p.name + '（可抽 ' + poolPlayableCount(p) + ' 张）',
       })
       if (p.coverCardUrl) {
-        tile.appendChild(el('img', { class: 'pool-tile-img', src: p.coverCardUrl, alt: '', loading: 'lazy' }))
+        tile.appendChild(el('img', { referrerpolicy: 'no-referrer', class: 'pool-tile-img', src: p.coverCardUrl, alt: '', loading: 'lazy' }))
       } else {
         tile.appendChild(el('div', { class: 'pool-tile-noimg', text: '无封面' }))
       }
@@ -970,13 +970,13 @@
       // 两层用同一个 URL —— 浏览器只会下载一次。
       track.appendChild(
         el('div', { class: 'banner-slide' }, [
-          el('img', {
+          el('img', { referrerpolicy: 'no-referrer',
             class: 'banner-blur',
             src: u,
             alt: '',
             loading: eager,
           }),
-          el('img', {
+          el('img', { referrerpolicy: 'no-referrer',
             class: 'banner-img',
             src: u,
             alt: (pool.name || '卡池') + ' 主视觉',
@@ -1090,8 +1090,15 @@
    * v1 -> v2：跨域镜像的图（opaque 响应）也要进缓存，键的形状与命中判据都变了，
    * 直接沿用旧名字会让「同一条 URL 命中一条内容不对的旧记录」。改名之后
    * sw.js 的 activate 会把 `gacha-img-` 开头的旧缓存全删掉，读者不会两头都占。
+   *
+   * v2 -> v3：**镜像的 403 被当成图片缓存过**。Gitee 对带 Referer 的请求回
+   * 403 JSON，而 no-cors 下这是个 opaque 响应，`res.type === 'opaque'` 就当作
+   * 「缓存成功」存了起来 —— 于是那些读者**永远**看到坏图：请求根本没出网，
+   * SW 直接把那条 403 当图片喂回 `<img>`。加了 no-referrer 之后必须把旧缓存
+   * 整批作废（改名即可，sw.js 的 activate 会自动删掉 `gacha-img-` 开头的旧的），
+   * 否则修了也没用 —— 他们命中的还是那条毒缓存。
    */
-  var IMG_CACHE = 'gacha-img-v2'
+  var IMG_CACHE = 'gacha-img-v3'
 
   /**
    * 图片镜像基址（来自 `settings.imageMirror` / `settings.imageFallback`）。
@@ -1390,7 +1397,10 @@
     var key = String(sampleUrl || '').replace(/[^/]*$/, '')
     if (corsProbe[key] !== undefined) return Promise.resolve(corsProbe[key])
     if (typeof fetch !== 'function') return Promise.resolve(false)
-    return fetch(sampleUrl, { mode: 'cors', credentials: 'omit', cache: 'force-cache' })
+    // 探针也要 no-referrer：带 Referer 时 Gitee 一律 403，
+    // 那会让这条探测**永远得出「镜像不支持 CORS」**的结论（403 在 no-cors 下读不出，
+    // 在 cors 下直接被拒），于是整批退化成 no-cors、大小永远读不出来。
+    return fetch(sampleUrl, { mode: 'cors', credentials: 'omit', cache: 'force-cache', referrerPolicy: 'no-referrer' })
       .then(function (res) {
         // 只有真的能读到内容才算「可用」：opaque 说明 CORS 没放行
         var ok = !!res && res.type !== 'opaque' && (res.ok || res.type === 'cors')
@@ -1454,7 +1464,14 @@
             var worker = function () {
               if (idx >= todo.length) return Promise.resolve()
               var u = todo[idx++]
-              var init = { credentials: 'same-origin' }
+              /**
+               * ⚠️ `referrerPolicy: 'no-referrer'` 是**必须的**，不是优化：
+               * Gitee 的镜像对带 Referer 的请求直接 403（`invalid Referer header`），
+               * 而 `fetch` 默认会带上来源页。少了这一行，「缓存全部图片」抓回来的
+               * 是一堆 403 —— no-cors 下还是 opaque，会被**当成缓存成功**存进去，
+               * 之后显示的就是坏图（而且 SW 那份缓存同样会被污染）。
+               */
+              var init = { credentials: 'same-origin', referrerPolicy: 'no-referrer' }
               var cross = isCrossOrigin(u)
               if (cross) {
                 // 跨域镜像：能 CORS 就 CORS（大小可读），否则退 no-cors（拿 opaque，
@@ -1931,7 +1948,7 @@
       // 开始**原生图片拖拽**（半透明残影 + 禁止光标），我们的 pointermove 也就断了。
       // 大图里的「按住拖动 = 换角度看闪卡」正是被这件事抢走的。
       // 属性值必须是字符串 'false' —— el() 会把布尔 false 当成「不设置」跳过。
-      var img = el('img', { class: 'card-img', src: card.imageUrl, alt: card.name || '卡面', loading: 'lazy', draggable: 'false' })
+      var img = el('img', { referrerpolicy: 'no-referrer', class: 'card-img', src: card.imageUrl, alt: card.name || '卡面', loading: 'lazy', draggable: 'false' })
       img.addEventListener('error', function () {
         // 绝不静默：图读不到要把原因和可点开的地址挂在卡上
         img.hidden = true
@@ -3377,7 +3394,7 @@
       var src = coverUrl || (cover && cover.imageUrl) || ''
       if (src) {
         return el('span', { class: className }, [
-          el('img', { class: 'group-cover-img', src: src, alt: alt || '', loading: 'lazy' }),
+          el('img', { referrerpolicy: 'no-referrer', class: 'group-cover-img', src: src, alt: alt || '', loading: 'lazy' }),
         ])
       }
       var ch = String(alt || '?').replace(/ 封面$/, '').slice(0, 1) || '?'
@@ -4864,7 +4881,7 @@
     var href = httpHref(ln.url)
     var kids = [
       ln.iconUrl
-        ? el('img', { class: 'link-icon-img', src: ln.iconUrl, alt: '', loading: 'lazy', draggable: 'false' })
+        ? el('img', { referrerpolicy: 'no-referrer', class: 'link-icon-img', src: ln.iconUrl, alt: '', loading: 'lazy', draggable: 'false' })
         : el('div', { class: 'link-icon', text: ln.icon || '🔗' }),
       el('div', { class: 'link-main' }, [
         el('div', { class: 'link-title' }, [
@@ -4880,7 +4897,7 @@
     if (ln.imageUrl) {
       kids.push(
         el('div', { class: 'link-qr' }, [
-          el('img', {
+          el('img', { referrerpolicy: 'no-referrer',
             class: 'link-qr-img',
             src: ln.imageUrl,
             alt: (ln.title || '链接') + ' 的配图',
@@ -5539,7 +5556,7 @@
     )
     state.data.cards.forEach(function (c) {
       var thumb = el('div', { class: 'thumb' })
-      if (c.imageUrl) thumb.appendChild(el('img', { src: c.imageUrl, alt: c.name, loading: 'lazy' }))
+      if (c.imageUrl) thumb.appendChild(el('img', { referrerpolicy: 'no-referrer', src: c.imageUrl, alt: c.name, loading: 'lazy' }))
       else thumb.appendChild(el('span', { class: 'thumb-none', text: '无图' }))
 
       var sel = el('select', { 'data-card-rarity': c.id })
@@ -6453,7 +6470,7 @@
       shown++
       var cell = el('button', { class: 'pick-cell', type: 'button', title: img.rel })
       var src = (CFG.api || '') + '/image?src=' + encodeURIComponent(img.rel)
-      cell.appendChild(el('img', { src: src, alt: img.name, loading: 'lazy' }))
+      cell.appendChild(el('img', { referrerpolicy: 'no-referrer', src: src, alt: img.name, loading: 'lazy' }))
       cell.appendChild(el('span', { class: 'pick-name', text: img.rel }))
       cell.addEventListener('click', function () {
         if (!pickTarget) return
