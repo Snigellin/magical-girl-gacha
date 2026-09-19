@@ -1198,8 +1198,36 @@
     var chain = imageChain(m[1])
     var i = chain.indexOf(src)
     if (i < 0 || i >= chain.length - 1) return
+    /**
+     * 这条地址读不到 —— **顺手把它从图片缓存里删掉**。
+     *
+     * 为什么必须删：Service Worker 抓跨域镜像时用的是 no-cors，镜像回 404 时
+     * 那个响应是 **opaque**（读不到状态码），而 SW 的判据写着「opaque 也算缓存成功」
+     * —— 于是 404 的正文被当成图片存了进去。等镜像那边把新图同步过来之后，
+     * 这位读者的 SW **仍然**拿那条毒缓存回话、图片继续报错、继续回退到慢线路，
+     * 而他自己完全修不好（除非按「强制重新下载」或等缓存被顶掉）。
+     * 删掉之后下一次访问就会重新走网络 —— 镜像好了就自动变快，不需要任何人做操作。
+     * （`cache: 'reload'` 的强制下载不受影响：它本来就不读缓存。）
+     */
+    forgetCachedImage(src)
     img.setAttribute('src', chain[i + 1])
     if (event.stopPropagation) event.stopPropagation()
+  }
+
+  /**
+   * 把一条地址从图片缓存里删掉（尽力而为）。
+   *
+   * 失败**不报错**：缓存是优化，删不掉也只是下次继续用旧的 —— 不该因为这件事
+   * 让一个「图片显示不出来」的路径再多抛一个异常出来。
+   */
+  function forgetCachedImage(url) {
+    if (!cacheSupported()) return
+    try {
+      caches
+        .open(IMG_CACHE)
+        .then(function (c) { return c.delete(absUrl(url)) })
+        .catch(function () {})
+    } catch (e) {}
   }
 
   function cacheSupported() {
