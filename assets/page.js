@@ -3702,8 +3702,17 @@
     var g = G()
     var cfg = g && typeof g.hrConfig === 'function' ? g.hrConfig(dataWithState()) : { enabled: true, shards: 20 }
     var cards = hrCards()
-    if (!cards.length) return null
     var have = Math.max(0, Number((shards() || {})[HR_SHARD_KEY] || 0))
+    /**
+     * ⚠️ 判据是「**有卡可以换 或 手上有碎片**」，不是「有卡可以换」。
+     *
+     * 只按卡片判断的话，读者会遇到一个自相矛盾的页面：他明明攒了 25 个 HR 碎片
+     * （重复全闪返的），碎片页上却**一个 HR 字样都没有** —— 看起来像碎片凭空消失，
+     * 而这正是用户 2026-09-19 报的问题（他在线上站看到的情况就是这一条：
+     * 静态站当时一张动态卡面都没导出，于是整块 HR 都没了）。
+     * 没卡可换的时候要**说清楚原因**，而不是把这一块藏起来。
+     */
+    if (!cards.length && have <= 0) return null
     var unlocked = cards.filter(function (c) { return hrUnlocked(c.id) }).length
     var rows = cards.map(function (c) {
       var done = hrUnlocked(c.id)
@@ -3736,14 +3745,22 @@
           '兑换后图鉴里可以切「动态卡面」，大图与格子都能播；' +
           '动态卡面与原卡面**共享特殊工艺**（原卡有平闪/全闪/红碎，动态形态也一样）。',
       }),
-      el('p', {
-        class: 'panel-hint',
-        text:
-          '共 ' + fmt(cards.length) + ' 张卡配了动态卡面，已解锁 ' + fmt(unlocked) + ' 张。' +
-          'HR 碎片**不能**换抽卡券 —— 它只有这一个用途；来源是抽到重复的**全闪**卡（普通池与逐梦池都返）。',
-      }),
+      cards.length
+        ? el('p', {
+            class: 'panel-hint',
+            text:
+              '共 ' + fmt(cards.length) + ' 张卡配了动态卡面，已解锁 ' + fmt(unlocked) + ' 张。' +
+              'HR 碎片**不能**换抽卡券 —— 它只有这一个用途；来源是抽到重复的**全闪**卡（普通池与逐梦池都返）。',
+          })
+        : el('p', {
+            class: 'panel-hint',
+            text:
+              '⚠️ 这本书目前**还没有配动态卡面（HR 视频）的卡**，所以现在没有可以兑换的东西 —— ' +
+              '碎片先留着，作者放进视频之后这里就会出现可兑换的卡。' +
+              'HR 碎片**不能**换抽卡券，它只有这一个用途；来源是抽到重复的**全闪**卡。',
+          }),
       el('div', { class: 'hr-rows' }, rows),
-      have >= cfg.shards ? null : el('p', { class: 'panel-hint', text: '还差 ' + fmt(cfg.shards - have) + ' 个碎片才能换第一张。' }),
+      have >= cfg.shards || !cards.length ? null : el('p', { class: 'panel-hint', text: '还差 ' + fmt(cfg.shards - have) + ' 个碎片才能换第一张。' }),
     ])
   }
 
