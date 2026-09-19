@@ -150,6 +150,17 @@
     foilView: {},
     /** 图鉴的工艺筛选：'' = 全部，否则只看拥有这门工艺的卡 */
     foilFilter: '',
+    /**
+     * 图鉴的稀有度筛选：'' = 全部，否则只看这一档。
+     *
+     * 取值为**档位 id**（`SR` / `SSR` / `UR` / `???`）或 `HR`。
+     * ⚠️ `HR` **不是档位表里的一项**（它是「这张卡有动态卡面」的状态，见 draw.js 的
+     * `canUnlockHr`）—— 但作者要求筛选里能选 HR（用户 2026-09-19：
+     * 「在筛选中新增筛选稀有度（SR/SSR/UR/SP/HR）」），所以它在这里是一个特例：
+     * 选中它 = 只看**配了动态卡面**的卡。别把它塞进 `data.rarities` ——
+     * 那会让概率表/卡池一览/动画配色各多出一档永远 0 张的幽灵档。
+     */
+    rarityFilter: '',
     /** 哪些卡池切到了追梦池模式：`{ 卡池id: true }`（读者偏好） */
     dreamPools: {},
     /** 在大图里换过工艺、图鉴格子还没跟上（关弹层时要重画一次） */
@@ -3376,7 +3387,41 @@
       )
     }
 
-    var listBox = el('div', { class: 'coll-list' })
+    /**
+     * 稀有度筛选的判据（**唯一一份**）：网格过滤与筛选条的计数都用它。
+     *
+     * `HR` 是特例：它不是档位表里的一项，而是「这张卡配了动态卡面」。
+     * 其余情况直接比档位 id。
+     */
+    function rarityMatches(card, want) {
+      if (!want) return true
+      if (want === 'HR') return !!card.dynamicUrl
+      return String(card.rarity || '') === want
+    }
+
+    /** 档位 id -> 显示名（用档位表里的 label，所以 `???` 显示成「SP」） */
+    function rarityText(id) {
+      var r = rarityById(id)
+      return (r && (r.label || r.id)) || id
+    }
+
+    /**
+     * 列表容器：**收起时是一格卡片，展开时占满整行**。
+     *
+     * 这是用户 2026-09-19 的要求：原来的标题是一整行（封面 + 名字 + 计数），
+     * 收起之后那一行还占着整个宽度，几十个系列就要滚很久；现在收起 = 一张
+     * 与抽卡结果同款的卡片（封面 2:3 + 名字 + 进度），一行能放好几张。
+     * 展开的组用 `grid-column: 1 / -1` 铺满，卡片网格本身不变。
+     */
+    function groupsBox(children) {
+      return el('div', { class: 'coll-groups' }, children)
+    }
+
+    var listBox = groupsBox([])
+    // 稀有度筛选条（作者要求：SR/SSR/UR/SP/HR）放在工艺筛选之前 ——
+    // 「这张卡是什么档位」比「它有没有闪」更常用来找卡
+    var rarityRow = rarityFilterRow()
+    if (rarityRow) wrap.appendChild(rarityRow)
     // 工艺筛选条：只有真的抽到过闪卡才出现（否则是一排点了没反应的按钮）
     var filterRow = foilFilterRow()
     if (filterRow) wrap.appendChild(filterRow)
@@ -3498,9 +3543,78 @@
       }
     }
 
+    /**
+     * 稀有度筛选条（用户 2026-09-19：「在筛选中新增筛选稀有度（SR/SSR/UR/SP/HR）」）。
+     *
+     * 档位来自**档位表**（标签用表里的 `label`，所以 SP 显示成「SP」而不是它的 id `???`），
+     * 另外多一个 `HR`：它不是档位，而是「**这张卡有动态卡面**」的状态
+     *（见 state.rarityFilter 的说明）—— 判据与网格共用 `rarityMatches`，
+     * 所以「筛选出来的张数」不会和实际显示的对不上。
+     */
+    function rarityFilterRow() {
+      var list = (state.data && state.data.rarities) || []
+      if (!list.length) return null
+      var counts = {}
+      var total = 0
+      var hrCount = 0
+      allCards.forEach(function (c) {
+        total++
+        if (c.dynamicUrl) hrCount++
+        counts[c.rarity] = (counts[c.rarity] || 0) + 1
+      })
+      var row = el('div', { class: 'rarity-filter' })
+      row.appendChild(el('span', { class: 'foil-filter-key', text: '稀有度' }))
+      row.appendChild(chip('', '全部', total))
+      // 档位表里的顺序就是强弱顺序（rank 升序），直接用，别在界面里再排一遍
+      list.forEach(function (r) {
+        if (!counts[r.id]) return
+        row.appendChild(chip(r.id, r.label || r.id, counts[r.id]))
+      })
+      // HR 永远显示（哪怕当前一张都没配）—— 它是「这个站有没有动态卡面」的唯一入口，
+      // 藏起来的话作者会以为筛选坏了
+      row.appendChild(chip('HR', 'HR', hrCount))
+      syncChips()
+      return row
+
+      function chip(id, label, count) {
+        var on = String(state.rarityFilter || '') === id
+        var b = el('button', {
+          class: 'foil-chip rarity-chip' + (on ? ' is-on' : '') + (id ? ' rarity-chip-' + id : ''),
+          type: 'button',
+          'data-rarity-filter': id,
+          'aria-pressed': on ? 'true' : 'false',
+          title: id === 'HR' ? '只看有动态卡面（HR）的卡' : '只看 ' + label + ' 档位的卡',
+        }, [el('span', { text: label }), count === null ? null : el('span', { class: 'foil-chip-count', text: String(count) })])
+        b.addEventListener('click', function () {
+          state.rarityFilter = id
+          syncChips()
+          paint()
+        })
+        return b
+      }
+
+      /** 与工艺筛选条同样的理由：那条是建视图时画一次，点 chip 只重画列表 */
+      function syncChips() {
+        var cur = String(state.rarityFilter || '')
+        var all = row.querySelectorAll('[data-rarity-filter]')
+        for (var i = 0; i < all.length; i++) {
+          var on = String(all[i].getAttribute('data-rarity-filter') || '') === cur
+          all[i].className = all[i].className.replace(/\s*\bis-on\b/, '') + (on ? ' is-on' : '')
+          all[i].setAttribute('aria-pressed', on ? 'true' : 'false')
+        }
+      }
+    }
+
     function paint() {
       clear(listBox)
       var q = String(state.collQuery || '').trim().toLowerCase()
+      var ff = String(state.foilFilter || '')
+      var rf = String(state.rarityFilter || '')
+      /**
+       * 有任何筛选在生效时要**强制展开**：搜到了/筛出来了却还收着，
+       * 看起来就像「搜不到」—— 这一条原来只对搜索词成立，现在筛选也算。
+       */
+      var filtering = !!q || !!ff || !!rf
       var groups = collectionGroups(allCards)
       var shownGroups = 0
       var shownSeries = 0
@@ -3539,10 +3653,10 @@
       }
 
       groups.forEach(function (g) {
-        // 先按搜索词 + 工艺筛选过滤：一级组里只剩匹配的卡/子组
-        var ff = String(state.foilFilter || '')
+        // 先按搜索词 + 工艺筛选 + 稀有度筛选过滤：一级组里只剩匹配的卡/子组
         var keep = function (c) {
           if (!cardMatches(c, q)) return false
+          if (!rarityMatches(c, rf)) return false
           if (!ff) return true
           // 工艺筛选用的是**拥有的工艺**，不是「现在显示的那一种」——
           // 读者切到普通版看原图时，筛选不该把他筛掉。
@@ -3562,7 +3676,7 @@
 
         var gotHere = gCards.filter(function (c) { return Number(owned[c.id] || 0) > 0 }).length
         // 搜索时强制展开：搜到了却还收着，看起来就像「搜不到」
-        var poolCollapsed = !q && !!collapsedMap()[g.key]
+        var poolCollapsed = !filtering && !!collapsedMap()[g.key]
 
         var poolHead = toggleHead({
           key: g.key,
@@ -3595,7 +3709,7 @@
           var sg = x.sg
           var list = x.list
           var sgGot = list.filter(function (c) { return Number(owned[c.id] || 0) > 0 }).length
-          var sgCollapsed = !q && !!collapsedMap()[sg.key]
+          var sgCollapsed = !filtering && !!collapsedMap()[sg.key]
           return el('div', { class: 'group group-series' + (sgCollapsed ? ' is-collapsed' : '') }, [
             toggleHead({
               key: sg.key,
@@ -3615,22 +3729,37 @@
         listBox.appendChild(
           el('div', { class: 'group group-pool' + (poolCollapsed ? ' is-collapsed' : '') }, [
             poolHead,
-            el('div', { class: 'group-body' }, seriesBoxes),
+            // 二级也用同一个「收起即卡片」的容器
+            groupsBox(seriesBoxes),
           ])
         )
       })
 
       if (!shownGroups) {
+        // 空结果的原因要**说清是哪一种**：搜索词、工艺筛选、稀有度筛选各自怎么退出来，
+        // 读者才知道下一步点哪里（一句「没有匹配」会让人以为站点坏了）
+        var why = []
+        if (q) why.push('搜索词「' + state.collQuery + '」')
+        if (rf) why.push('稀有度筛选「' + (rf === 'HR' ? 'HR' : rarityText(rf)) + '」')
+        if (ff) why.push('工艺筛选「' + foilLabel(ff) + '」')
+        if (rf === 'HR' && !hrCards().length) {
+          why.push('（这本书目前还没有配动态卡面的卡）')
+        }
         listBox.appendChild(
           emptyBox('没有匹配的卡牌', [
-            '没有卡牌的名字、系列或稀有度包含「' + state.collQuery + '」。',
-            '清空搜索框就会恢复全部 ' + allCards.length + ' 张。',
+            why.length ? '当前条件：' + why.join(' + ') + '。' : '没有卡牌符合当前条件。',
+            '点筛选条上的「全部」、或清空搜索框，就会恢复全部 ' + allCards.length + ' 张。',
           ])
         )
       }
-      foundNote.textContent = q
-        ? '找到 ' + shownCards + ' 张' + (shownSeries ? '（' + shownSeries + ' 个系列）' : '')
-        : '共 ' + allCards.length + ' 张 · ' + seriesNames.length + ' 个系列'
+      // 措辞按**用了哪种方式**分开：搜索说「找到」，胶囊筛选说「筛选后」——
+      // 两者混在一起时读者分不清「是我搜的词起作用了，还是筛选还开着」
+      var chipFiltering = !!ff || !!rf
+      foundNote.textContent = chipFiltering
+        ? '筛选后 ' + shownCards + ' 张' + (shownSeries ? '（' + shownSeries + ' 个系列）' : '')
+        : q
+          ? '找到 ' + shownCards + ' 张' + (shownSeries ? '（' + shownSeries + ' 个系列）' : '')
+          : '共 ' + allCards.length + ' 张 · ' + seriesNames.length + ' 个系列'
     }
 
     paint()

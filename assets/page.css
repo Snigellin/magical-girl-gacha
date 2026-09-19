@@ -382,6 +382,23 @@ body {
   margin: 0 0 0.9rem;
 }
 
+/* 稀有度筛选条：与工艺筛选条同款，只是多一行 —— 两行之间留小一点的间距，
+   让它们读起来像「一块筛选区」，而不是两块各自独立的东西 */
+.rarity-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.45rem;
+}
+
+/* 选中时用档位自己的颜色（与卡面角标一致）：SR 蓝 / SSR 紫 / UR 金 / SP 红 / HR 强调色 */
+.rarity-chip-SR.is-on { border-color: #5b8def; background: rgba(91, 141, 239, 0.16); color: #5b8def; }
+.rarity-chip-SSR.is-on { border-color: #c46bd8; background: rgba(196, 107, 216, 0.16); color: #c46bd8; }
+.rarity-chip-UR.is-on { border-color: #e8a33d; background: rgba(232, 163, 61, 0.18); color: #b8860b; }
+.rarity-chip-\?\?\?.is-on { border-color: #e5484d; background: rgba(229, 72, 77, 0.16); color: #c62828; }
+.rarity-chip-HR.is-on { border-color: var(--accent); background: var(--accent-weak); color: var(--accent-strong); }
+
 .foil-filter-key {
   font-size: 0.78rem;
   font-weight: 600;
@@ -1797,6 +1814,103 @@ body:has(dialog[open]) .bar {
 }
 
 /* --------------------------------------------------------------------------
+   组容器：收起时是**卡片网格**，展开时占满整行
+   --------------------------------------------------------------------------
+   用户 2026-09-19：「即使收起也依旧会占一整行的空间，把布局改为类似抽卡结果
+   一样的卡片布局」。所以收起的组渲染成一张与抽卡结果同款的卡（封面 2:3 + 名字 +
+   进度），一行放好几张；展开的组 `grid-column: 1 / -1` 铺满，里面的卡片网格不变。
+   -------------------------------------------------------------------------- */
+.coll-groups {
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: repeat(auto-fill, minmax(8.4rem, 1fr));
+  align-items: start;
+}
+
+/* 展开的组铺满整行（它的卡片网格需要整个宽度） */
+.coll-groups > .group {
+  grid-column: 1 / -1;
+}
+
+/* 收起的组 = 一个格子 */
+.coll-groups > .group.is-collapsed {
+  grid-column: auto;
+}
+
+/* 收起的那一格：标题变成一张卡片 */
+.coll-groups > .group.is-collapsed {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.coll-groups > .group.is-collapsed > .group-head {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  width: 100%;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  overflow: hidden;
+  transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.coll-groups > .group.is-collapsed > .group-head:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lift);
+}
+
+/* 收起的封面 = 卡面（2:3，铺满整格宽），不再是小缩略图 */
+.coll-groups > .group.is-collapsed .group-cover {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border: 0;
+  border-radius: 0;
+}
+
+/* 展开按钮的提示：卡片右上角一个小圆标（在封面上要压得住底色） */
+.coll-groups > .group.is-collapsed .group-caret {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.35rem;
+  z-index: 2;
+  width: auto;
+  min-width: 1.2rem;
+  padding: 0 0.25rem;
+  border-radius: 999px;
+  background: rgba(20, 20, 26, 0.55);
+  color: #fff;
+  text-align: center;
+}
+
+/* 文字改成竖排（名字一行、进度一行） */
+.coll-groups > .group.is-collapsed .group-text {
+  display: block;
+  padding: 0.45rem 0.55rem 0.55rem;
+  line-height: 1.35;
+}
+
+.coll-groups > .group.is-collapsed .group-meta {
+  display: block;
+  margin-top: 0.1rem;
+  font-size: 0.78rem;
+}
+
+/* 卡池说明太长，卡片里不显示（悬停 title 里还有） */
+.coll-groups > .group.is-collapsed .group-note {
+  display: none;
+}
+
+.coll-groups > .group.is-collapsed .pool-name {
+  font-size: 0.95rem;
+}
+
+/* --------------------------------------------------------------------------
    图鉴的两级分组：一级 = 卡池，二级 = 系列
    --------------------------------------------------------------------------
    各级都有封面，**点封面就是展开/收起**（整个标题都是按钮，封面在按钮里面）。
@@ -1806,13 +1920,11 @@ body:has(dialog[open]) .bar {
   gap: 0.7rem;
 }
 
-.group-body {
-  display: grid;
-  gap: 0.7rem;
-}
-
-/* 一级收起时整块二级都收起来（平铺的一级组里直接是 .grid.cards，由上面那条管） */
-.group-pool.is-collapsed > .group-body {
+/* 一级收起时整块二级都收起来（平铺的一级组里直接是 .grid.cards，由上面那条管）。
+   ⚠️ 二级的容器现在是 `.coll-groups`（卡片网格）—— 这条曾经写的是 `.group-body`，
+   容器改名之后它**静默失效**：卡池收起了，里面的系列还全都在。
+   改这类容器名时，记得搜一遍有没有按旧名字写的规则（测试里也有一条闸门盯着它）。 */
+.group-pool.is-collapsed > .coll-groups {
   display: none;
 }
 
